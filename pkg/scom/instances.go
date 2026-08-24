@@ -63,7 +63,7 @@ ORDER BY bme.DisplayName`, defaultSearchLimit, joins)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Option
 	for rows.Next() {
@@ -98,7 +98,7 @@ WHERE bme.IsDeleted = 0`
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var ids []string
 	for rows.Next() {

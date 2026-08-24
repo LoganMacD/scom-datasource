@@ -61,7 +61,7 @@ func QueryHealthCurrent(ctx context.Context, db *sql.DB, instanceIDs []string) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var entities, healthStates []string
 	var lastModified []time.Time
@@ -135,7 +135,7 @@ func QueryHealthHistory(ctx context.Context, db *sql.DB, instanceIDs []string, f
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var entities, oldStates, newStates []string
 	var times []time.Time

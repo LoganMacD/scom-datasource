@@ -29,7 +29,7 @@ ORDER BY ResolutionState`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Option
 	for rows.Next() {
@@ -106,7 +106,7 @@ func QueryAlerts(ctx context.Context, db *sql.DB, f AlertFilter) (*data.Frame, e
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var (
 		alertIDs, names, entities, severities, priorities, resolutionStates, owners, descriptions []string
@@ -265,7 +265,7 @@ func QueryAlertsWarehouse(ctx context.Context, warehouse *sql.DB, operational *s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var (
 		alertIDs, names, entities, severities, priorities, resolutionStates, owners, descriptions []string

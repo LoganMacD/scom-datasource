@@ -55,12 +55,12 @@ func Open(settings *models.PluginSettings) (*DB, error) {
 
 	dwDSN, err := BuildDSN(settings.Warehouse, settings.Secrets.WarehousePassword)
 	if err != nil {
-		opDB.Close()
+		_ = opDB.Close()
 		return nil, fmt.Errorf("warehouse connection: %w", err)
 	}
 	dwDB, err := openWithSessionInit(dwDSN)
 	if err != nil {
-		opDB.Close()
+		_ = opDB.Close()
 		return nil, fmt.Errorf("warehouse connection: %w", err)
 	}
 
@@ -69,10 +69,10 @@ func Open(settings *models.PluginSettings) (*DB, error) {
 
 func (db *DB) Close() {
 	if db.Operational != nil {
-		db.Operational.Close()
+		_ = db.Operational.Close()
 	}
 	if db.Warehouse != nil {
-		db.Warehouse.Close()
+		_ = db.Warehouse.Close()
 	}
 }
 
@@ -102,6 +102,6 @@ func probe(ctx context.Context, conn *sql.DB, query string) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return rows.Err()
 }

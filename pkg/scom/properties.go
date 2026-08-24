@@ -69,7 +69,7 @@ ORDER BY ORDINAL_POSITION`, sql.Named("viewName", viewName))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var cols []string
 	skip := map[string]bool{"BaseManagedEntityId": true}
@@ -157,7 +157,7 @@ WHERE bme.BaseManagedEntityId IN %s`, inSQL), args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	groups := map[string][]string{}
 	for rows.Next() {
@@ -233,7 +233,7 @@ WHERE bme.BaseManagedEntityId IN %s`, inSQL)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	cols, err := rows.Columns()
 	if err != nil {

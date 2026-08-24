@@ -119,7 +119,7 @@ WHERE pr.ObjectName = @object AND pr.CounterName = @counterName%s`, scopeClause)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var ids []string
 	for rows.Next() {
@@ -137,7 +137,7 @@ func runOptionsQuery(ctx context.Context, db *sql.DB, query string, args []any) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Option
 	for rows.Next() {

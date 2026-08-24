@@ -111,7 +111,7 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, enti
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type seriesKey struct {
 		ruleInstanceID  string

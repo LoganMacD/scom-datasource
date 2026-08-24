@@ -62,7 +62,7 @@ func SearchClasses(ctx context.Context, db *sql.DB, search string, by SearchBy) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Option
 	for rows.Next() {

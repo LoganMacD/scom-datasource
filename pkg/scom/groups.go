@@ -29,7 +29,7 @@ func SearchGroups(ctx context.Context, db *sql.DB, search string) ([]Option, err
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Option
 	for rows.Next() {

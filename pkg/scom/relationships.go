@@ -57,7 +57,7 @@ OPTION (MAXRECURSION 20)`, inSQL)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []string
 	for rows.Next() {
