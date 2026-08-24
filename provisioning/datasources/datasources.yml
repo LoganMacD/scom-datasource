@@ -1,0 +1,31 @@
+apiVersion: 1
+
+datasources:
+  - name: 'SCOM'
+    type: 'scom-datasource'
+    access: proxy
+    isDefault: false
+    orgId: 1
+    version: 1
+    editable: true
+    jsonData:
+      operational:
+        host: 'localhost'
+        port: '1433'
+        database: 'OperationsManager'
+        authType: 'sql'
+        username: 'grafana_reader'
+        encrypt: 'true'
+        trustServerCertificate: false
+      warehouseSameAsOperational: false
+      warehouse:
+        host: 'localhost'
+        port: '1433'
+        database: 'OperationsManagerDW'
+        authType: 'sql'
+        username: 'grafana_reader'
+        encrypt: 'true'
+        trustServerCertificate: false
+    secureJsonData:
+      operationalPassword: 'change-me'
+      warehousePassword: 'change-me'

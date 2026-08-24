@@ -1,0 +1,76 @@
+package scom
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+// These assertions target the exact bugs found in production: dbo.Monitor
+// has no DisplayName column, dbo.State has no InMaintenanceMode column, and
+// dbo.StateChangeEvent's timestamp is TimeGenerated, not
+// StateChangeEventTime. A test asserting the correct identifiers would have
+// failed loudly on all three instead of surfacing as a runtime mssql error.
+func TestBuildHealthCurrentQuery(t *testing.T) {
+	query, args := buildHealthCurrentQuery([]string{"inst-1", "inst-2"})
+
+	wantContain := []string{
+		"FROM dbo.State s",
+		"INNER JOIN dbo.BaseManagedEntity bme ON s.BaseManagedEntityId = bme.BaseManagedEntityId",
+		// Overall health only: scoped to the entity's health rollup monitor,
+		// not joined against every component monitor.
+		"AND s.MonitorId = dbo.fn_ManagedTypeId_SystemHealthEntityState()",
+		// Health state display name, with the documented MonitorOperationalState
+		// join and fallback CASE, not a raw HealthState int.
+		"LEFT JOIN dbo.MonitorOperationalState mos ON mos.MonitorId = s.MonitorId AND mos.HealthState = s.HealthState",
+		"ISNULL(mos.MonitorOperationalStateName, CASE s.HealthState",
+		// InMaintenanceMode comes from dbo.MaintenanceMode, not a nonexistent
+		// column on dbo.State.
+		"LEFT JOIN dbo.MaintenanceMode mm ON mm.BaseManagedEntityId = bme.BaseManagedEntityId",
+		"ISNULL(mm.IsInMaintenanceMode, 0) AS InMaintenanceMode",
+		"WHERE s.BaseManagedEntityId IN (@inst0, @inst1)",
+	}
+	for _, want := range wantContain {
+		if !strings.Contains(query, want) {
+			t.Errorf("query missing %q\nfull query:\n%s", want, query)
+		}
+	}
+	// The bug that shipped: a bare join to dbo.Monitor (no DisplayName column
+	// there) instead of dbo.MonitorView/dbo.MonitorOperationalState.
+	if strings.Contains(query, "dbo.Monitor m ") {
+		t.Errorf("query should not join the bare dbo.Monitor table\nfull query:\n%s", query)
+	}
+	if len(args) != 2 {
+		t.Fatalf("got %d args, want 2", len(args))
+	}
+}
+
+func TestBuildHealthHistoryQuery(t *testing.T) {
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	query, args := buildHealthHistoryQuery([]string{"inst-1"}, from, to)
+
+	wantContain := []string{
+		"FROM dbo.StateChangeEvent sce",
+		"INNER JOIN dbo.State s ON sce.StateId = s.StateId",
+		"AND s.MonitorId = dbo.fn_ManagedTypeId_SystemHealthEntityState()",
+		"ISNULL(mosOld.MonitorOperationalStateName, CASE sce.OldHealthState",
+		"ISNULL(mosNew.MonitorOperationalStateName, CASE sce.NewHealthState",
+		// sce.TimeGenerated is the real column; StateChangeEventTime doesn't
+		// exist on dbo.StateChangeEvent.
+		"sce.TimeGenerated",
+		"AND sce.TimeGenerated >= @from AND sce.TimeGenerated <= @to",
+		"ORDER BY sce.TimeGenerated DESC",
+	}
+	for _, want := range wantContain {
+		if !strings.Contains(query, want) {
+			t.Errorf("query missing %q\nfull query:\n%s", want, query)
+		}
+	}
+	if strings.Contains(query, "StateChangeEventTime") {
+		t.Errorf("query references the nonexistent StateChangeEventTime column\nfull query:\n%s", query)
+	}
+	if len(args) != 3 { // from, to, inst0
+		t.Fatalf("got %d args, want 3", len(args))
+	}
+}
