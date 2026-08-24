@@ -11,7 +11,9 @@
     "lint:fix": "npm run lint -- --fix && prettier --write --list-different .",
     "e2e": "playwright test",
     "server": "docker compose up --build",
-    "sign": "sign-plugin"
+    "sign": "sign-plugin",
+    "release": "npm version",
+    "postversion": "git push && git push --tags"
   },
   "author": "Logan",
   "license": "Apache-2.0",
