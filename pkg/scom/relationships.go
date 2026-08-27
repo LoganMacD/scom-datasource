@@ -20,38 +20,7 @@ func ExpandHostedEntityIDs(ctx context.Context, db *sql.DB, ids []string) ([]str
 		return nil, nil
 	}
 
-	// The recursive CTE below is deliberately written to keep Id as
-	// uniqueidentifier throughout (no varchar round-trip) and to resolve
-	// the Hosting/Containment relationship types once into a table
-	// variable up front. Doing the type filter as a join with an OR
-	// predicate inside the recursive member, or converting Id to varchar
-	// and back on every recursion step, defeats index seeks and can make
-	// SQL Server's optimizer give up with "the query processor ran out of
-	// internal resources" even at a low MAXRECURSION.
-	inSQL, inArgs := inClause("root", ids)
-	query := fmt.Sprintf(`
-DECLARE @HostingTypes TABLE (RelationshipTypeGuid uniqueidentifier PRIMARY KEY);
-INSERT INTO @HostingTypes (RelationshipTypeGuid)
-SELECT RelationshipTypeGuid
-FROM CS.RelationshipType
-WHERE HostingInd = 1 OR ContainmentInd = 1;
-
-;WITH Hosted (Id) AS (
-	SELECT bme.BaseManagedEntityId
-	FROM dbo.BaseManagedEntity bme
-	WHERE bme.BaseManagedEntityId IN %s
-		AND bme.IsDeleted = 0
-
-	UNION ALL
-
-	SELECT rel.TargetEntityId
-	FROM dbo.Relationship rel
-	INNER JOIN Hosted h ON rel.SourceEntityId = h.Id
-	WHERE rel.IsDeleted = 0
-		AND rel.RelationshipTypeId IN (SELECT RelationshipTypeGuid FROM @HostingTypes)
-)
-SELECT DISTINCT CONVERT(varchar(64), Id) AS Id FROM Hosted
-OPTION (MAXRECURSION 20)`, inSQL)
+	query, inArgs := expandHostedEntityIDsQuery(ids)
 
 	rows, err := db.QueryContext(ctx, query, inArgs...)
 	if err != nil {
@@ -68,4 +37,64 @@ OPTION (MAXRECURSION 20)`, inSQL)
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+func expandHostedEntityIDsQuery(ids []string) (string, []any) {
+	inSQL, inArgs := inClause("root", ids)
+
+	// Use iterative frontier expansion in temp tables instead of a recursive
+	// CTE: for some customer environments, SQL Server can fail to compile the
+	// recursive shape with "query processor ran out of internal resources".
+	query := fmt.Sprintf(`
+CREATE TABLE #HostingTypes (RelationshipTypeGuid uniqueidentifier PRIMARY KEY);
+INSERT INTO #HostingTypes (RelationshipTypeGuid)
+SELECT RelationshipTypeGuid
+FROM CS.RelationshipType
+WHERE HostingInd = 1 OR ContainmentInd = 1;
+
+CREATE TABLE #Visited (Id uniqueidentifier PRIMARY KEY);
+CREATE TABLE #Frontier (Id uniqueidentifier PRIMARY KEY);
+CREATE TABLE #NextFrontier (Id uniqueidentifier PRIMARY KEY);
+
+INSERT INTO #Frontier (Id)
+SELECT bme.BaseManagedEntityId
+FROM dbo.BaseManagedEntity bme
+WHERE bme.BaseManagedEntityId IN %s
+	AND bme.IsDeleted = 0;
+
+INSERT INTO #Visited (Id)
+SELECT Id FROM #Frontier;
+
+DECLARE @Depth int = 0;
+DECLARE @MaxDepth int = 20;
+
+WHILE @Depth < @MaxDepth AND EXISTS (SELECT 1 FROM #Frontier)
+BEGIN
+	TRUNCATE TABLE #NextFrontier;
+
+	INSERT INTO #NextFrontier (Id)
+	SELECT DISTINCT rel.TargetEntityId
+	FROM dbo.Relationship rel
+	INNER JOIN #Frontier f ON rel.SourceEntityId = f.Id
+	INNER JOIN #HostingTypes ht ON rel.RelationshipTypeId = ht.RelationshipTypeGuid
+	WHERE rel.IsDeleted = 0
+		AND NOT EXISTS (SELECT 1 FROM #Visited v WHERE v.Id = rel.TargetEntityId);
+
+	IF @@ROWCOUNT = 0 BREAK;
+
+	INSERT INTO #Visited (Id)
+	SELECT nf.Id
+	FROM #NextFrontier nf;
+
+	TRUNCATE TABLE #Frontier;
+	INSERT INTO #Frontier (Id)
+	SELECT Id FROM #NextFrontier;
+
+	SET @Depth = @Depth + 1;
+END;
+
+SELECT CONVERT(varchar(64), Id) AS Id
+FROM #Visited;`, inSQL)
+
+	return query, inArgs
 }
