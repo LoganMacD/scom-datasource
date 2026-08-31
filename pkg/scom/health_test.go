@@ -28,7 +28,12 @@ func TestBuildHealthCurrentQuery(t *testing.T) {
 		// column on dbo.State.
 		"LEFT JOIN dbo.MaintenanceMode mm ON mm.BaseManagedEntityId = bme.BaseManagedEntityId",
 		"ISNULL(mm.IsInMaintenanceMode, 0) AS InMaintenanceMode",
-		"WHERE s.BaseManagedEntityId IN (@inst0, @inst1)",
+		// Instance ids are scoped via a temp table join, not a literal IN
+		// list — a raw, unexpanded class/group selection can be large enough
+		// to blow past SQL Server's per-query parameter limit.
+		"CREATE TABLE #HealthScope",
+		"INSERT INTO #HealthScope",
+		"WHERE s.BaseManagedEntityId IN (SELECT Id FROM #HealthScope)",
 	}
 	for _, want := range wantContain {
 		if !strings.Contains(query, want) {
@@ -40,8 +45,10 @@ func TestBuildHealthCurrentQuery(t *testing.T) {
 	if strings.Contains(query, "dbo.Monitor m ") {
 		t.Errorf("query should not join the bare dbo.Monitor table\nfull query:\n%s", query)
 	}
-	if len(args) != 2 {
-		t.Fatalf("got %d args, want 2", len(args))
+	// Exactly one bound parameter regardless of how many instance ids are
+	// scoped — see idScopeTempTable.
+	if len(args) != 1 {
+		t.Fatalf("got %d args, want 1", len(args))
 	}
 }
 
@@ -61,6 +68,8 @@ func TestBuildHealthHistoryQuery(t *testing.T) {
 		"sce.TimeGenerated",
 		"AND sce.TimeGenerated >= @from AND sce.TimeGenerated <= @to",
 		"ORDER BY sce.TimeGenerated DESC",
+		"CREATE TABLE #HealthScope",
+		"WHERE s.BaseManagedEntityId IN (SELECT Id FROM #HealthScope)",
 	}
 	for _, want := range wantContain {
 		if !strings.Contains(query, want) {
@@ -70,7 +79,7 @@ func TestBuildHealthHistoryQuery(t *testing.T) {
 	if strings.Contains(query, "StateChangeEventTime") {
 		t.Errorf("query references the nonexistent StateChangeEventTime column\nfull query:\n%s", query)
 	}
-	if len(args) != 3 { // from, to, inst0
+	if len(args) != 3 { // from, to, idScopeValues
 		t.Fatalf("got %d args, want 3", len(args))
 	}
 }

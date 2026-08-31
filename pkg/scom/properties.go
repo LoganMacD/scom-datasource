@@ -147,13 +147,21 @@ func QueryProperties(ctx context.Context, db *sql.DB, instanceIDs []string, prop
 	return frames, nil
 }
 
+// propertiesScopeTempTable is the temp table groupInstancesByClass/
+// queryPropertiesForClass populate with instanceIDs, joined via a subquery
+// rather than folded into a literal IN list — a class/group selection can be
+// large enough to blow past SQL Server's per-query parameter limit. See
+// idScopeTempTable and the same fix in counters.go/performance.go/alerts.go/
+// health.go.
+const propertiesScopeTempTable = "#PropertyScope"
+
 func groupInstancesByClass(ctx context.Context, db *sql.DB, instanceIDs []string) (map[string][]string, error) {
-	inSQL, args := inClause("inst", instanceIDs)
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+	setupSQL, args := idScopeTempTable(propertiesScopeTempTable, instanceIDs)
+	rows, err := db.QueryContext(ctx, setupSQL+fmt.Sprintf(`
 SELECT CONVERT(varchar(64), bme.BaseManagedEntityId), mt.TypeName
 FROM dbo.BaseManagedEntity bme
 INNER JOIN dbo.ManagedType mt ON bme.BaseManagedTypeId = mt.ManagedTypeId
-WHERE bme.BaseManagedEntityId IN %s`, inSQL), args...)
+WHERE bme.BaseManagedEntityId IN (SELECT Id FROM %s)`, propertiesScopeTempTable), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -218,8 +226,8 @@ func queryPropertiesForClass(ctx context.Context, db *sql.DB, typeName string, i
 		}
 	}
 
-	inSQL, args := inClause("inst", instanceIDs)
-	query := fmt.Sprintf(`
+	setupSQL, args := idScopeTempTable(propertiesScopeTempTable, instanceIDs)
+	query := setupSQL + fmt.Sprintf(`
 SELECT bme.DisplayName AS InstanceDisplayName, %s
 FROM dbo.BaseManagedEntity bme`, strings.Join(selectCols, ", "))
 	if needsClassView {
@@ -227,7 +235,7 @@ FROM dbo.BaseManagedEntity bme`, strings.Join(selectCols, ", "))
 INNER JOIN dbo.%s cv ON cv.BaseManagedEntityId = bme.BaseManagedEntityId`, quoteIdent(viewName))
 	}
 	query += fmt.Sprintf(`
-WHERE bme.BaseManagedEntityId IN %s`, inSQL)
+WHERE bme.BaseManagedEntityId IN (SELECT Id FROM %s)`, propertiesScopeTempTable)
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {

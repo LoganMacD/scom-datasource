@@ -3,7 +3,6 @@ package scom
 import (
 	"context"
 	"database/sql"
-	"fmt"
 )
 
 // ExpandHostedEntityIDs returns ids plus every entity recursively hosted or
@@ -40,12 +39,22 @@ func ExpandHostedEntityIDs(ctx context.Context, db *sql.DB, ids []string) ([]str
 }
 
 func expandHostedEntityIDsQuery(ids []string) (string, []any) {
-	inSQL, inArgs := inClause("root", ids)
+	// The seed ids are themselves a class/group's raw, unexpanded
+	// ResolveInstanceIDs output — every downstream caller of
+	// ExpandHostedEntityIDs (counters/performance/alerts scoping) widens from
+	// here, so this is the earliest point a large selection can blow past a
+	// literal IN list. Seed via a temp table join instead — see
+	// idScopeTempTable. #RootIds is always created, even with no rows, so the
+	// join below stays valid when ids is empty.
+	rootSetupSQL, rootArgs := idScopeTempTable("#RootIds", ids)
+	if rootSetupSQL == "" {
+		rootSetupSQL = "CREATE TABLE #RootIds (Id uniqueidentifier PRIMARY KEY);\n"
+	}
 
 	// Use iterative frontier expansion in temp tables instead of a recursive
 	// CTE: for some customer environments, SQL Server can fail to compile the
 	// recursive shape with "query processor ran out of internal resources".
-	query := fmt.Sprintf(`
+	query := rootSetupSQL + `
 CREATE TABLE #HostingTypes (RelationshipTypeGuid uniqueidentifier PRIMARY KEY);
 INSERT INTO #HostingTypes (RelationshipTypeGuid)
 SELECT RelationshipTypeGuid
@@ -59,8 +68,8 @@ CREATE TABLE #NextFrontier (Id uniqueidentifier PRIMARY KEY);
 INSERT INTO #Frontier (Id)
 SELECT bme.BaseManagedEntityId
 FROM dbo.BaseManagedEntity bme
-WHERE bme.BaseManagedEntityId IN %s
-	AND bme.IsDeleted = 0;
+INNER JOIN #RootIds r ON r.Id = bme.BaseManagedEntityId
+WHERE bme.IsDeleted = 0;
 
 INSERT INTO #Visited (Id)
 SELECT Id FROM #Frontier;
@@ -94,7 +103,7 @@ BEGIN
 END;
 
 SELECT CONVERT(varchar(64), Id) AS Id
-FROM #Visited;`, inSQL)
+FROM #Visited;`
 
-	return query, inArgs
+	return query, rootArgs
 }

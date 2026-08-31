@@ -55,8 +55,9 @@ func TestBuildAlertsQuery(t *testing.T) {
 		}
 
 		// args must be built in the same order the WHERE fragments appear:
-		// instance scope, severity, resolution state, then from/to.
-		wantNames := []string{"scope0", "sev0", "sev1", "res0", "from", "to"}
+		// instance scope (always exactly one param, however many ids — see
+		// idScopeTempTable), severity, resolution state, then from/to.
+		wantNames := []string{"idScopeValues", "sev0", "sev1", "res0", "from", "to"}
 		if len(args) != len(wantNames) {
 			t.Fatalf("got %d args, want %d", len(args), len(wantNames))
 		}
@@ -114,7 +115,7 @@ func TestBuildAlertsWarehouseQuery(t *testing.T) {
 			t.Errorf("query missing resolution state filter: %s", query)
 		}
 
-		wantNames := []string{"scope0", "sev0", "sev1", "res0", "from", "to"}
+		wantNames := []string{"idScopeValues", "sev0", "sev1", "res0", "from", "to"}
 		if len(args) != len(wantNames) {
 			t.Fatalf("got %d args, want %d", len(args), len(wantNames))
 		}

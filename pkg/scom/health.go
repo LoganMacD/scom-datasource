@@ -25,12 +25,20 @@ func healthStateCase(monitorOSAlias, healthStateCol string) string {
 	END)`, monitorOSAlias, healthStateCol, healthStateCol)
 }
 
+// healthScopeTempTable is the temp table buildHealthCurrentQuery/
+// buildHealthHistoryQuery populate with instanceIDs. Unlike the other
+// query-scoping call sites, instanceIDs here can be the raw, unexpanded
+// ResolveInstanceIDs output for a class/group (no ExpandHostedEntityIDs
+// widening) — still large enough to blow past a literal IN list. See
+// idScopeTempTable and the same fix in counters.go/performance.go/alerts.go.
+const healthScopeTempTable = "#HealthScope"
+
 // buildHealthCurrentQuery builds the query+args for QueryHealthCurrent. Kept
 // separate from execution so the generated SQL can be asserted against in
 // tests without a live DB — see health_test.go.
 func buildHealthCurrentQuery(instanceIDs []string) (string, []any) {
-	inSQL, args := inClause("inst", instanceIDs)
-	query := fmt.Sprintf(`
+	setupSQL, args := idScopeTempTable(healthScopeTempTable, instanceIDs)
+	query := setupSQL + fmt.Sprintf(`
 SELECT
 	bme.DisplayName AS ManagedEntity,
 	%s AS HealthState,
@@ -40,9 +48,9 @@ FROM dbo.State s
 INNER JOIN dbo.BaseManagedEntity bme ON s.BaseManagedEntityId = bme.BaseManagedEntityId
 LEFT JOIN dbo.MonitorOperationalState mos ON mos.MonitorId = s.MonitorId AND mos.HealthState = s.HealthState
 LEFT JOIN dbo.MaintenanceMode mm ON mm.BaseManagedEntityId = bme.BaseManagedEntityId
-WHERE s.BaseManagedEntityId IN %s
+WHERE s.BaseManagedEntityId IN (SELECT Id FROM %s)
 	AND s.MonitorId = dbo.fn_ManagedTypeId_SystemHealthEntityState()
-ORDER BY bme.DisplayName`, healthStateCase("mos", "s.HealthState"), inSQL)
+ORDER BY bme.DisplayName`, healthStateCase("mos", "s.HealthState"), healthScopeTempTable)
 	return query, args
 }
 
@@ -97,10 +105,10 @@ func QueryHealthCurrent(ctx context.Context, db *sql.DB, instanceIDs []string) (
 // separate from execution so the generated SQL can be asserted against in
 // tests without a live DB — see health_test.go.
 func buildHealthHistoryQuery(instanceIDs []string, from, to time.Time) (string, []any) {
-	inSQL, inArgs := inClause("inst", instanceIDs)
+	setupSQL, inArgs := idScopeTempTable(healthScopeTempTable, instanceIDs)
 	args := append([]any{sql.Named("from", from), sql.Named("to", to)}, inArgs...)
 
-	query := fmt.Sprintf(`
+	query := setupSQL + fmt.Sprintf(`
 SELECT
 	bme.DisplayName AS ManagedEntity,
 	%s AS OldHealthState,
@@ -111,13 +119,13 @@ INNER JOIN dbo.State s ON sce.StateId = s.StateId
 INNER JOIN dbo.BaseManagedEntity bme ON s.BaseManagedEntityId = bme.BaseManagedEntityId
 LEFT JOIN dbo.MonitorOperationalState mosOld ON mosOld.MonitorId = s.MonitorId AND mosOld.HealthState = sce.OldHealthState
 LEFT JOIN dbo.MonitorOperationalState mosNew ON mosNew.MonitorId = s.MonitorId AND mosNew.HealthState = sce.NewHealthState
-WHERE s.BaseManagedEntityId IN %s
+WHERE s.BaseManagedEntityId IN (SELECT Id FROM %s)
 	AND s.MonitorId = dbo.fn_ManagedTypeId_SystemHealthEntityState()
 	AND sce.TimeGenerated >= @from AND sce.TimeGenerated <= @to
 ORDER BY sce.TimeGenerated DESC`,
 		healthStateCase("mosOld", "sce.OldHealthState"),
 		healthStateCase("mosNew", "sce.NewHealthState"),
-		inSQL)
+		healthScopeTempTable)
 	return query, args
 }
 

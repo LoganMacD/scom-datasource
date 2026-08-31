@@ -2,7 +2,10 @@ package scom
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
+
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 func TestInClause(t *testing.T) {
@@ -44,6 +47,55 @@ func TestInClause(t *testing.T) {
 			if named.Value != v {
 				t.Fatalf("arg %d: got value %v, want %v", i, named.Value, v)
 			}
+		}
+	})
+}
+
+func TestIDScopeTempTable(t *testing.T) {
+	t.Run("empty values applies no scope", func(t *testing.T) {
+		query, args := idScopeTempTable("#Scope", nil)
+		if query != "" || args != nil {
+			t.Fatalf("got query=%q args=%v, want empty", query, args)
+		}
+	})
+
+	t.Run("any size list binds exactly one parameter", func(t *testing.T) {
+		many := make([]string, 5000)
+		for i := range many {
+			many[i] = "11111111-1111-1111-1111-111111111111"
+		}
+
+		query, args := idScopeTempTable("#Scope", many)
+		if !strings.Contains(query, "CREATE TABLE #Scope (Id uniqueidentifier PRIMARY KEY)") {
+			t.Errorf("query missing temp table creation: %s", query)
+		}
+		if !strings.Contains(query, "FROM STRING_SPLIT(@idScopeValues, ',')") {
+			t.Errorf("query missing STRING_SPLIT population: %s", query)
+		}
+		// The whole point: parameter count must stay at 1 no matter how many
+		// ids are scoped — SQL Server hard-caps a single RPC at ~2,100
+		// parameters, and that cap applies to the call as a whole, not to any
+		// one statement inside a multi-statement batch.
+		if len(args) != 1 {
+			t.Fatalf("got %d args, want exactly 1 regardless of list length", len(args))
+		}
+		named, ok := args[0].(sql.NamedArg)
+		if !ok {
+			t.Fatalf("arg is %T, want sql.NamedArg", args[0])
+		}
+		if named.Name != "idScopeValues" {
+			t.Errorf("got param name %q, want idScopeValues", named.Name)
+		}
+		// VarCharMax, not a bare string: the value is pure ASCII (GUIDs and
+		// comma delimiters), so it's sent as VARCHAR(MAX) rather than paying
+		// for NVARCHAR's 2-bytes-per-char Unicode encoding on a large list.
+		value, ok := named.Value.(mssql.VarCharMax)
+		if !ok {
+			t.Fatalf("arg value is %T, want mssql.VarCharMax", named.Value)
+		}
+		joined := string(value)
+		if wantCommas := len(many) - 1; strings.Count(joined, ",") != wantCommas {
+			t.Errorf("got %d commas in joined value, want %d", strings.Count(joined, ","), wantCommas)
 		}
 	})
 }

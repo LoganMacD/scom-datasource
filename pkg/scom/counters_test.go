@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 func TestCounterScopeClause(t *testing.T) {
@@ -34,11 +36,13 @@ func TestCounterScopeClause(t *testing.T) {
 		if !strings.Contains(clause, "ph.PerformanceRuleInstanceRowId = pri.PerformanceRuleInstanceRowId") {
 			t.Errorf("clause missing correlation to outer pri alias: %s", clause)
 		}
-		if len(args) != 2 {
-			t.Fatalf("got %d args, want 2", len(args))
+		// Exactly one bound parameter regardless of how many ids are scoped —
+		// see idScopeTempTable.
+		if len(args) != 1 {
+			t.Fatalf("got %d args, want 1", len(args))
 		}
-		if args[0].(sql.NamedArg).Value != "guid-1" || args[1].(sql.NamedArg).Value != "guid-2" {
-			t.Errorf("got args=%v, want guid-1 then guid-2", args)
+		if args[0].(sql.NamedArg).Value != mssql.VarCharMax("guid-1,guid-2") {
+			t.Errorf("got args=%v, want a single comma-joined VarCharMax value", args)
 		}
 	})
 }

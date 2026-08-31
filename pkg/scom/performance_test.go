@@ -97,8 +97,10 @@ func TestBuildPerformanceQuery(t *testing.T) {
 		if !strings.Contains(query, "AND me.ManagedEntityGuid IN (SELECT Id FROM #EntityScope)") {
 			t.Errorf("query missing entity id filter joined against the temp table: %s", query)
 		}
-		if len(args) != 5 { // from, to, ctr0, ent0, ent1
-			t.Fatalf("got %d args, want 5", len(args))
+		// from, to, ctr0, plus exactly one bound param for the entity scope
+		// regardless of how many entity ids there are — see idScopeTempTable.
+		if len(args) != 4 {
+			t.Fatalf("got %d args, want 4", len(args))
 		}
 	})
 
