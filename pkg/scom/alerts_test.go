@@ -38,8 +38,14 @@ func TestBuildAlertsQuery(t *testing.T) {
 			From:            from,
 			To:              to,
 		})
-		if !strings.Contains(query, "AND a.BaseManagedEntityId IN (@inst0)") {
-			t.Errorf("query missing instance filter: %s", query)
+		if !strings.Contains(query, "CREATE TABLE #AlertScope") {
+			t.Errorf("query missing instance scope temp table creation: %s", query)
+		}
+		if !strings.Contains(query, "INSERT INTO #AlertScope") {
+			t.Errorf("query missing instance scope temp table population: %s", query)
+		}
+		if !strings.Contains(query, "AND a.BaseManagedEntityId IN (SELECT Id FROM #AlertScope)") {
+			t.Errorf("query missing instance filter joined against the temp table: %s", query)
 		}
 		if !strings.Contains(query, "AND a.Severity IN (@sev0, @sev1)") {
 			t.Errorf("query missing severity filter: %s", query)
@@ -49,8 +55,8 @@ func TestBuildAlertsQuery(t *testing.T) {
 		}
 
 		// args must be built in the same order the WHERE fragments appear:
-		// instance, severity, resolution state, then from/to.
-		wantNames := []string{"inst0", "sev0", "sev1", "res0", "from", "to"}
+		// instance scope, severity, resolution state, then from/to.
+		wantNames := []string{"scope0", "sev0", "sev1", "res0", "from", "to"}
 		if len(args) != len(wantNames) {
 			t.Fatalf("got %d args, want %d", len(args), len(wantNames))
 		}
@@ -92,8 +98,14 @@ func TestBuildAlertsWarehouseQuery(t *testing.T) {
 			From:            from,
 			To:              to,
 		})
-		if !strings.Contains(query, "AND me.ManagedEntityGuid IN (@inst0)") {
-			t.Errorf("query missing instance filter: %s", query)
+		if !strings.Contains(query, "CREATE TABLE #AlertScope") {
+			t.Errorf("query missing instance scope temp table creation: %s", query)
+		}
+		if !strings.Contains(query, "INSERT INTO #AlertScope") {
+			t.Errorf("query missing instance scope temp table population: %s", query)
+		}
+		if !strings.Contains(query, "AND me.ManagedEntityGuid IN (SELECT Id FROM #AlertScope)") {
+			t.Errorf("query missing instance filter joined against the temp table: %s", query)
 		}
 		if !strings.Contains(query, "AND a.Severity IN (@sev0, @sev1)") {
 			t.Errorf("query missing severity filter: %s", query)
@@ -102,7 +114,7 @@ func TestBuildAlertsWarehouseQuery(t *testing.T) {
 			t.Errorf("query missing resolution state filter: %s", query)
 		}
 
-		wantNames := []string{"inst0", "sev0", "sev1", "res0", "from", "to"}
+		wantNames := []string{"scope0", "sev0", "sev1", "res0", "from", "to"}
 		if len(args) != len(wantNames) {
 			t.Fatalf("got %d args, want %d", len(args), len(wantNames))
 		}

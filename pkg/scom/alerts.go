@@ -42,17 +42,28 @@ ORDER BY ResolutionState`)
 	return out, rows.Err()
 }
 
+// alertScopeTempTable is the temp table buildAlertsQuery/
+// buildAlertsWarehouseQuery populate with InstanceIDs. A hosting-expanded
+// class/group selection can run into the thousands of ids, and folding that
+// many into a literal IN list (one @param per id) both risks SQL Server's
+// 2,100-parameters-per-query limit and can make the optimizer choke trying
+// to fold it into the plan — see idScopeTempTable and the same fix in
+// counters.go/performance.go.
+const alertScopeTempTable = "#AlertScope"
+
 // buildAlertsQuery builds the query+args for QueryAlerts. Kept separate from
 // execution so the generated SQL/WHERE clause can be asserted against in
 // tests without a live DB — see alerts_test.go.
 func buildAlertsQuery(f AlertFilter) (string, []any) {
 	var args []any
+	setupSQL := ""
 	where := "1 = 1"
 
 	if len(f.InstanceIDs) > 0 {
-		inSQL, inArgs := inClause("inst", f.InstanceIDs)
-		where += fmt.Sprintf(" AND a.BaseManagedEntityId IN %s", inSQL)
-		args = append(args, inArgs...)
+		instSetupSQL, instArgs := idScopeTempTable(alertScopeTempTable, f.InstanceIDs)
+		setupSQL = instSetupSQL
+		where += fmt.Sprintf(" AND a.BaseManagedEntityId IN (SELECT Id FROM %s)", alertScopeTempTable)
+		args = append(args, instArgs...)
 	}
 	if len(f.Severities) > 0 {
 		strs := make([]string, len(f.Severities))
@@ -76,7 +87,7 @@ func buildAlertsQuery(f AlertFilter) (string, []any) {
 	where += " AND a.TimeRaised >= @from AND a.TimeRaised <= @to"
 	args = append(args, sql.Named("from", f.From), sql.Named("to", f.To))
 
-	query := fmt.Sprintf(`
+	query := setupSQL + fmt.Sprintf(`
 SELECT
 	CONVERT(varchar(64), a.AlertId) AS AlertId,
 	a.AlertName,
@@ -167,12 +178,14 @@ func QueryAlerts(ctx context.Context, db *sql.DB, f AlertFilter) (*data.Frame, e
 // resolution state 0 (New) via ISNULL, matching dbo.Alert's own default.
 func buildAlertsWarehouseQuery(f AlertFilter) (string, []any) {
 	var args []any
+	setupSQL := ""
 	where := "1 = 1"
 
 	if len(f.InstanceIDs) > 0 {
-		inSQL, inArgs := inClause("inst", f.InstanceIDs)
-		where += fmt.Sprintf(" AND me.ManagedEntityGuid IN %s", inSQL)
-		args = append(args, inArgs...)
+		instSetupSQL, instArgs := idScopeTempTable(alertScopeTempTable, f.InstanceIDs)
+		setupSQL = instSetupSQL
+		where += fmt.Sprintf(" AND me.ManagedEntityGuid IN (SELECT Id FROM %s)", alertScopeTempTable)
+		args = append(args, instArgs...)
 	}
 	if len(f.Severities) > 0 {
 		strs := make([]string, len(f.Severities))
@@ -196,7 +209,7 @@ func buildAlertsWarehouseQuery(f AlertFilter) (string, []any) {
 	where += " AND a.RaisedDateTime >= @from AND a.RaisedDateTime <= @to"
 	args = append(args, sql.Named("from", f.From), sql.Named("to", f.To))
 
-	query := fmt.Sprintf(`
+	query := setupSQL + fmt.Sprintf(`
 ;WITH LatestState AS (
 	SELECT
 		ars.AlertGuid,
