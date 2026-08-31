@@ -34,6 +34,16 @@ func aggregationTable(agg Aggregation) (table, valueColumn string, err error) {
 	}
 }
 
+// performanceEntityScopeTempTable is the temp table buildPerformanceQuery
+// populates with entityIDs when scoping to a class/group selection. See
+// idScopeTempTable: a large id list is joined via this table rather than
+// folded into a literal IN list, since this query already joins
+// Perf.vPerfHourly/Daily/Raw (a huge DW fact view) to three other tables —
+// exactly the shape that can make SQL Server's optimizer give up with "the
+// query processor ran out of internal resources" once entityIDs is large
+// (e.g. a hosting-expanded class/group with hundreds of members).
+const performanceEntityScopeTempTable = "#EntityScope"
+
 // buildPerformanceQuery builds the query+args for QueryPerformance. Kept
 // separate from execution so the generated SQL can be asserted against in
 // tests without a live DB — see performance_test.go.
@@ -62,14 +72,16 @@ func buildPerformanceQuery(counterIDs []string, entityIDs []string, agg Aggregat
 		sql.Named("to", to),
 	}, inArgs...)
 
+	setupSQL := ""
 	entityFilter := ""
 	if len(entityIDs) > 0 {
-		entSQL, entArgs := inClause("ent", entityIDs)
-		entityFilter = fmt.Sprintf("\n\tAND me.ManagedEntityGuid IN %s", entSQL)
+		entitySetupSQL, entArgs := idScopeTempTable(performanceEntityScopeTempTable, entityIDs)
+		setupSQL = entitySetupSQL
+		entityFilter = fmt.Sprintf("\n\tAND me.ManagedEntityGuid IN (SELECT Id FROM %s)", performanceEntityScopeTempTable)
 		args = append(args, entArgs...)
 	}
 
-	query := fmt.Sprintf(`
+	query := setupSQL + fmt.Sprintf(`
 SELECT
 	p.PerformanceRuleInstanceRowId,
 	CONVERT(varchar(64), me.ManagedEntityGuid) AS ManagedEntityGuid,

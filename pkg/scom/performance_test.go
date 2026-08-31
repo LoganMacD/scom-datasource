@@ -62,8 +62,11 @@ func TestBuildPerformanceQuery(t *testing.T) {
 		if !strings.Contains(query, "WHERE p.PerformanceRuleInstanceRowId IN (@ctr0)") {
 			t.Errorf("query missing counter id filter: %s", query)
 		}
-		if strings.Contains(query, "ManagedEntityGuid IN (") {
+		if strings.Contains(query, "ManagedEntityGuid IN") {
 			t.Errorf("query should not filter by entity when entityIDs is empty: %s", query)
+		}
+		if strings.Contains(query, "#EntityScope") {
+			t.Errorf("query should not set up an entity scope temp table when entityIDs is empty: %s", query)
 		}
 		if len(args) != 3 { // from, to, ctr0
 			t.Fatalf("got %d args, want 3", len(args))
@@ -80,13 +83,19 @@ func TestBuildPerformanceQuery(t *testing.T) {
 		}
 	})
 
-	t.Run("entityIDs scopes results to selected managed entities", func(t *testing.T) {
+	t.Run("entityIDs scopes results via a temp table join, not a literal IN list", func(t *testing.T) {
 		query, args, err := buildPerformanceQuery([]string{"ctr-1"}, []string{"ent-1", "ent-2"}, AggregationHourly, from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(query, "AND me.ManagedEntityGuid IN (@ent0, @ent1)") {
-			t.Errorf("query missing entity id filter: %s", query)
+		if !strings.Contains(query, "CREATE TABLE #EntityScope") {
+			t.Errorf("query missing entity scope temp table creation: %s", query)
+		}
+		if !strings.Contains(query, "INSERT INTO #EntityScope") {
+			t.Errorf("query missing entity scope temp table population: %s", query)
+		}
+		if !strings.Contains(query, "AND me.ManagedEntityGuid IN (SELECT Id FROM #EntityScope)") {
+			t.Errorf("query missing entity id filter joined against the temp table: %s", query)
 		}
 		if len(args) != 5 { // from, to, ctr0, ent0, ent1
 			t.Fatalf("got %d args, want 5", len(args))

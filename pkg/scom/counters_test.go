@@ -8,22 +8,28 @@ import (
 
 func TestCounterScopeClause(t *testing.T) {
 	t.Run("empty instanceIDs applies no scope", func(t *testing.T) {
-		clause, args := counterScopeClause(nil)
-		if clause != "" || args != nil {
-			t.Fatalf("got clause=%q args=%v, want empty", clause, args)
+		setupSQL, clause, args := counterScopeClause(nil)
+		if setupSQL != "" || clause != "" || args != nil {
+			t.Fatalf("got setupSQL=%q clause=%q args=%v, want empty", setupSQL, clause, args)
 		}
 	})
 
-	t.Run("non-empty instanceIDs scopes by ManagedEntityGuid", func(t *testing.T) {
-		clause, args := counterScopeClause([]string{"guid-1", "guid-2"})
+	t.Run("non-empty instanceIDs scopes via a temp table join", func(t *testing.T) {
+		setupSQL, clause, args := counterScopeClause([]string{"guid-1", "guid-2"})
+		if !strings.Contains(setupSQL, "CREATE TABLE #CounterScope") {
+			t.Errorf("setupSQL missing temp table creation: %s", setupSQL)
+		}
+		if !strings.Contains(setupSQL, "INSERT INTO #CounterScope") {
+			t.Errorf("setupSQL missing temp table population: %s", setupSQL)
+		}
 		if !strings.Contains(clause, "AND EXISTS (") {
 			t.Errorf("clause missing EXISTS wrapper: %s", clause)
 		}
 		if !strings.Contains(clause, "FROM Perf.vPerfHourly ph") {
 			t.Errorf("clause missing Perf.vPerfHourly: %s", clause)
 		}
-		if !strings.Contains(clause, "me.ManagedEntityGuid IN") {
-			t.Errorf("clause missing ManagedEntityGuid filter: %s", clause)
+		if !strings.Contains(clause, "me.ManagedEntityGuid IN (SELECT Id FROM #CounterScope)") {
+			t.Errorf("clause missing temp table join, still using a literal IN list: %s", clause)
 		}
 		if !strings.Contains(clause, "ph.PerformanceRuleInstanceRowId = pri.PerformanceRuleInstanceRowId") {
 			t.Errorf("clause missing correlation to outer pri alias: %s", clause)

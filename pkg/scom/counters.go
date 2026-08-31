@@ -6,25 +6,35 @@ import (
 	"fmt"
 )
 
-// counterScopeClause builds an "AND EXISTS (...)" fragment that restricts a
-// pri-aliased dbo.vPerformanceRuleInstance row to counters that actually
-// have collected data for one of the given (already hosting-expanded)
-// instance ids. Returns ("", nil) when instanceIDs is empty, applying no
-// scope at all.
-func counterScopeClause(instanceIDs []string) (string, []any) {
-	if len(instanceIDs) == 0 {
-		return "", nil
+// counterScopeTempTable is the fixed name of the local temp table
+// counterScopeClause populates with instance ids. Fixed rather than derived
+// per call, matching the #Visited/#Frontier naming in relationships.go — each
+// call gets its own connection-scoped temp table, so there's no collision
+// risk across concurrent requests.
+const counterScopeTempTable = "#CounterScope"
+
+// counterScopeClause builds a setup batch plus an "AND EXISTS (...)"
+// fragment that restricts a pri-aliased dbo.vPerformanceRuleInstance row to
+// counters that actually have collected data for one of the given (already
+// hosting-expanded) instance ids. The candidate ids are loaded into a temp
+// table and joined via a subquery rather than folded into a large IN list —
+// see idScopeTempTable for why. setupSQL must be prepended to the query
+// text before existsClause is used. Returns ("", "", nil) when instanceIDs
+// is empty, applying no scope at all.
+func counterScopeClause(instanceIDs []string) (setupSQL, existsClause string, args []any) {
+	setupSQL, args = idScopeTempTable(counterScopeTempTable, instanceIDs)
+	if setupSQL == "" {
+		return "", "", nil
 	}
 
-	inSQL, inArgs := inClause("inst", instanceIDs)
-	clause := fmt.Sprintf(`
+	existsClause = fmt.Sprintf(`
 	AND EXISTS (
 		SELECT 1 FROM Perf.vPerfHourly ph
 		INNER JOIN dbo.vManagedEntity me ON ph.ManagedEntityRowId = me.ManagedEntityRowId
 		WHERE ph.PerformanceRuleInstanceRowId = pri.PerformanceRuleInstanceRowId
-			AND me.ManagedEntityGuid IN %s
-	)`, inSQL)
-	return clause, inArgs
+			AND me.ManagedEntityGuid IN (SELECT Id FROM %s)
+	)`, counterScopeTempTable)
+	return setupSQL, existsClause, args
 }
 
 // SearchCounterObjects backs the /counter-objects resource endpoint: the
@@ -32,10 +42,10 @@ func counterScopeClause(instanceIDs []string) (string, []any) {
 // performance object names (e.g. "Process", "Memory"), scoped to instanceIDs
 // like SearchCounterNames/SearchCounterInstances below.
 func SearchCounterObjects(ctx context.Context, db *sql.DB, instanceIDs []string, search string) ([]Option, error) {
-	scopeClause, scopeArgs := counterScopeClause(instanceIDs)
+	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
 	args := append([]any{sql.Named("search", search)}, scopeArgs...)
 
-	query := fmt.Sprintf(`
+	query := setupSQL + fmt.Sprintf(`
 SELECT DISTINCT TOP %d
 	pr.ObjectName AS Id,
 	pr.ObjectName AS Label
@@ -51,10 +61,10 @@ ORDER BY pr.ObjectName`, defaultSearchLimit, scopeClause)
 // picker step, scoped to a chosen object. Returns distinct counter names
 // (e.g. "Working Set", "% Processor Time") for that object.
 func SearchCounterNames(ctx context.Context, db *sql.DB, instanceIDs []string, object, search string) ([]Option, error) {
-	scopeClause, scopeArgs := counterScopeClause(instanceIDs)
+	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
 	args := append([]any{sql.Named("search", search), sql.Named("object", object)}, scopeArgs...)
 
-	query := fmt.Sprintf(`
+	query := setupSQL + fmt.Sprintf(`
 SELECT DISTINCT TOP %d
 	pr.CounterName AS Id,
 	pr.CounterName AS Label
@@ -73,14 +83,14 @@ ORDER BY pr.CounterName`, defaultSearchLimit, scopeClause)
 // DW's own PerformanceRuleInstanceRowId as the option value — performance.go
 // can then query Perf.vPerfHourly/Daily/Raw directly on that id.
 func SearchCounterInstances(ctx context.Context, db *sql.DB, instanceIDs []string, object, counterName, search string) ([]Option, error) {
-	scopeClause, scopeArgs := counterScopeClause(instanceIDs)
+	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
 	args := append([]any{
 		sql.Named("search", search),
 		sql.Named("object", object),
 		sql.Named("counterName", counterName),
 	}, scopeArgs...)
 
-	query := fmt.Sprintf(`
+	query := setupSQL + fmt.Sprintf(`
 SELECT TOP %d
 	CONVERT(varchar(20), pri.PerformanceRuleInstanceRowId) AS Id,
 	CASE WHEN pri.InstanceName IS NOT NULL AND pri.InstanceName <> ''
@@ -103,13 +113,13 @@ ORDER BY pri.InstanceName`, defaultSearchLimit, scopeClause)
 // instances narrowed" then means "every instance reporting this counter,"
 // mirroring ResolveInstanceIDs's "no instances chosen" semantics.
 func ResolveCounterInstanceIDs(ctx context.Context, db *sql.DB, instanceIDs []string, object, counterName string) ([]string, error) {
-	scopeClause, scopeArgs := counterScopeClause(instanceIDs)
+	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
 	args := append([]any{
 		sql.Named("object", object),
 		sql.Named("counterName", counterName),
 	}, scopeArgs...)
 
-	query := fmt.Sprintf(`
+	query := setupSQL + fmt.Sprintf(`
 SELECT CONVERT(varchar(20), pri.PerformanceRuleInstanceRowId)
 FROM dbo.vPerformanceRuleInstance pri
 INNER JOIN dbo.vPerformanceRule pr ON pri.RuleRowId = pr.RuleRowId
