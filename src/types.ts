@@ -81,6 +81,12 @@ export interface MyQuery extends DataQuery {
   counterName?: ResourceRef;
   counters?: ResourceRef[];
   aggregation?: Aggregation;
+  // Overrides the default series legend ("Object - Counter [Instance]
+  // (Entity)"), which reads every field there is and gets unwieldy fast.
+  // Supports {{object}}, {{counter}}, {{instance}}, {{entity}} macros; empty
+  // (including on a query saved before this field existed) keeps the
+  // built-in default — see seriesLabel in pkg/scom/performance.go.
+  legendFormat?: string;
   // Ignores class/group/instances entirely and returns every alert in the
   // time range (still subject to severity/resolution state filters below).
   allAlerts?: boolean;

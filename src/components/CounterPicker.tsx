@@ -1,6 +1,6 @@
-import React, { useCallback } from 'react';
+import React, { ChangeEvent, useCallback } from 'react';
 import { SelectableValue } from '@grafana/data';
-import { Combobox, ComboboxOption, InlineField, MultiCombobox, RadioButtonGroup } from '@grafana/ui';
+import { Combobox, ComboboxOption, InlineField, Input, MultiCombobox, RadioButtonGroup } from '@grafana/ui';
 import { DataSource } from '../datasource';
 import { Aggregation, ResourceRef } from '../types';
 
@@ -13,10 +13,16 @@ interface Props {
   counterName?: ResourceRef;
   value?: ResourceRef[];
   aggregation: Aggregation;
+  legendFormat?: string;
   onObjectChange: (value?: ResourceRef) => void;
   onCounterNameChange: (value?: ResourceRef) => void;
   onChange: (value: ResourceRef[]) => void;
   onAggregationChange: (aggregation: Aggregation) => void;
+  onLegendFormatChange: (legendFormat: string) => void;
+  // Legend format only takes effect on blur, not per keystroke — matching
+  // how other Grafana query editors avoid re-running the query on every
+  // character typed.
+  onRunQuery: () => void;
 }
 
 const AGGREGATION_OPTIONS: Array<SelectableValue<Aggregation>> = [
@@ -34,10 +40,13 @@ export function CounterPicker({
   counterName,
   value,
   aggregation,
+  legendFormat,
   onObjectChange,
   onCounterNameChange,
   onChange,
   onAggregationChange,
+  onLegendFormatChange,
+  onRunQuery,
 }: Props) {
   const scopeKey = `${classId ?? ''}|${groupId ?? ''}|${instanceIds.join(',')}`;
 
@@ -128,6 +137,19 @@ export function CounterPicker({
           options={AGGREGATION_OPTIONS}
           value={aggregation}
           onChange={(v) => onAggregationChange(v ?? 'hourly')}
+        />
+      </InlineField>
+      <InlineField
+        label="Legend"
+        labelWidth={14}
+        grow
+        tooltip="Customize the series legend. Available macros: {{object}}, {{counter}}, {{instance}}, {{entity}}. Leave blank for the default: Object - Counter [Instance] (Entity)."
+      >
+        <Input
+          value={legendFormat ?? ''}
+          placeholder="{{object}} - {{counter}} [{{instance}}] ({{entity}})"
+          onChange={(e: ChangeEvent<HTMLInputElement>) => onLegendFormatChange(e.target.value)}
+          onBlur={onRunQuery}
         />
       </InlineField>
     </>

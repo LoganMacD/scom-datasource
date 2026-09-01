@@ -111,3 +111,44 @@ func TestBuildPerformanceQuery(t *testing.T) {
 		}
 	})
 }
+
+func TestSeriesLabel(t *testing.T) {
+	t.Run("empty legendFormat falls back to the built-in default", func(t *testing.T) {
+		got := seriesLabel("", "LogicalDisk", "% Free Space", "C:", "server01.contoso.example.com")
+		want := "LogicalDisk - % Free Space [C:] (server01.contoso.example.com)"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty legendFormat omits the instance segment when there's no instance", func(t *testing.T) {
+		got := seriesLabel("", "Memory", "Available Bytes", "", "server01.contoso.example.com")
+		want := "Memory - Available Bytes (server01.contoso.example.com)"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("legendFormat substitutes every macro", func(t *testing.T) {
+		got := seriesLabel("{{entity}}: {{object}}/{{counter}} [{{instance}}]", "LogicalDisk", "% Free Space", "C:", "server01")
+		want := "server01: LogicalDisk/% Free Space [C:]"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("legendFormat with no macros passes through unchanged", func(t *testing.T) {
+		got := seriesLabel("fixed label", "LogicalDisk", "% Free Space", "C:", "server01")
+		if got != "fixed label" {
+			t.Errorf("got %q, want %q", got, "fixed label")
+		}
+	})
+
+	t.Run("legendFormat referencing a macro for missing data substitutes empty string", func(t *testing.T) {
+		got := seriesLabel("{{object}} [{{instance}}]", "Memory", "Available Bytes", "", "server01")
+		want := "Memory []"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+}

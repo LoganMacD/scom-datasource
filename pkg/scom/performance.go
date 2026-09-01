@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/data"
@@ -102,14 +103,46 @@ ORDER BY p.PerformanceRuleInstanceRowId, me.ManagedEntityGuid, p.DateTime`, valu
 	return query, args, nil
 }
 
+// seriesLabelMacros lists the placeholders seriesLabel substitutes in a
+// user-supplied legendFormat. Kept alongside seriesLabel so the query
+// editor's help text (src/components/CounterPicker.tsx) has one place to
+// stay in sync with.
+const seriesLabelMacros = "{{object}}, {{counter}}, {{instance}}, {{entity}}"
+
+// seriesLabel renders a performance series' legend. The built-in default —
+// "Object - Counter (Entity)", or "Object - Counter [Instance] (Entity)"
+// when the counter has a named instance — reads every field there is,
+// which gets unwieldy fast (e.g. a LogicalDisk counter against a
+// long FQDN: "LogicalDisk - % Free Space [C:] (server01.contoso.example.com)").
+// legendFormat lets a query override that with its own template using the
+// macros in seriesLabelMacros; instanceName substitutes as "" for a counter
+// with no instance, same as it's omitted from the default format.
+func seriesLabel(legendFormat, objectName, counterName, instanceName, entityName string) string {
+	if legendFormat == "" {
+		if instanceName != "" {
+			return fmt.Sprintf("%s - %s [%s] (%s)", objectName, counterName, instanceName, entityName)
+		}
+		return fmt.Sprintf("%s - %s (%s)", objectName, counterName, entityName)
+	}
+
+	replacer := strings.NewReplacer(
+		"{{object}}", objectName,
+		"{{counter}}", counterName,
+		"{{instance}}", instanceName,
+		"{{entity}}", entityName,
+	)
+	return replacer.Replace(legendFormat)
+}
+
 // QueryPerformance returns one time-series frame per (counter, managed
 // entity) pair — counterIDs (from the /counters resource picker) alone don't
 // identify a single class instance, since dbo.PerformanceRuleInstance is
 // shared across every entity reporting the same rule+instance name; see
 // buildPerformanceQuery. entityIDs optionally scopes results to a specific
 // set of (already hosting-expanded) managed entities; pass nil/empty for
-// "every entity reporting these counters."
-func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, entityIDs []string, agg Aggregation, from, to time.Time) ([]*data.Frame, error) {
+// "every entity reporting these counters." legendFormat customizes the
+// series label — see seriesLabel; pass "" for the built-in default.
+func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, entityIDs []string, agg Aggregation, legendFormat string, from, to time.Time) ([]*data.Frame, error) {
 	if len(counterIDs) == 0 {
 		return nil, nil
 	}
@@ -154,10 +187,7 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, enti
 		key := seriesKey{ruleInstanceID: ruleInstanceID, managedEntityID: managedEntityID}
 		s, ok := seriesByKey[key]
 		if !ok {
-			label := fmt.Sprintf("%s - %s (%s)", objectName, counterName, entityName)
-			if instanceName.Valid && instanceName.String != "" {
-				label = fmt.Sprintf("%s - %s [%s] (%s)", objectName, counterName, instanceName.String, entityName)
-			}
+			label := seriesLabel(legendFormat, objectName, counterName, instanceName.String, entityName)
 			s = &series{label: label}
 			seriesByKey[key] = s
 			order = append(order, key)

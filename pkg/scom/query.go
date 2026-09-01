@@ -28,20 +28,24 @@ type ResourceRef struct {
 // QueryModel mirrors src/types.ts's MyQuery. It's what QueryData unmarshals
 // each backend.DataQuery.JSON into.
 type QueryModel struct {
-	QueryType       QueryType     `json:"queryType"`
-	Class           *ResourceRef  `json:"class"`
-	Group           *ResourceRef  `json:"group"`
-	Instances       []ResourceRef `json:"instances"`
-	Object          *ResourceRef  `json:"object"`
-	CounterName     *ResourceRef  `json:"counterName"`
-	Counters        []ResourceRef `json:"counters"`
-	Aggregation     Aggregation   `json:"aggregation"`
-	AllAlerts       bool          `json:"allAlerts"`
-	Severities      []int64       `json:"severityFilter"`
-	ResolutionState []int64       `json:"resolutionStateFilter"`
-	AlertSource     AlertSource   `json:"alertSource"`
-	PropertyNames   []string      `json:"propertyNames"`
-	HealthMode      HealthMode    `json:"healthMode"`
+	QueryType   QueryType     `json:"queryType"`
+	Class       *ResourceRef  `json:"class"`
+	Group       *ResourceRef  `json:"group"`
+	Instances   []ResourceRef `json:"instances"`
+	Object      *ResourceRef  `json:"object"`
+	CounterName *ResourceRef  `json:"counterName"`
+	Counters    []ResourceRef `json:"counters"`
+	Aggregation Aggregation   `json:"aggregation"`
+	// LegendFormat overrides the default performance series label — see
+	// seriesLabel in performance.go. Empty (including on a query saved before
+	// this field existed) keeps the built-in default.
+	LegendFormat    string      `json:"legendFormat"`
+	AllAlerts       bool        `json:"allAlerts"`
+	Severities      []int64     `json:"severityFilter"`
+	ResolutionState []int64     `json:"resolutionStateFilter"`
+	AlertSource     AlertSource `json:"alertSource"`
+	PropertyNames   []string    `json:"propertyNames"`
+	HealthMode      HealthMode  `json:"healthMode"`
 }
 
 // AlertSource selects which database an alerts query reads from. The zero
@@ -149,7 +153,7 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time) ([]*dat
 			}
 			counterIDs = resolved
 		}
-		return QueryPerformance(ctx, db.Warehouse, counterIDs, scopedIDs, qm.Aggregation, from, to)
+		return QueryPerformance(ctx, db.Warehouse, counterIDs, scopedIDs, qm.Aggregation, qm.LegendFormat, from, to)
 
 	case QueryTypeAlerts:
 		// Alerts are almost always raised against the object that actually
