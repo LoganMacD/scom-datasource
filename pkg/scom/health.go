@@ -40,6 +40,7 @@ func buildHealthCurrentQuery(instanceIDs []string) (string, []any) {
 	setupSQL, args := idScopeTempTable(healthScopeTempTable, instanceIDs)
 	query := setupSQL + fmt.Sprintf(`
 SELECT
+	CONVERT(varchar(64), bme.BaseManagedEntityId) AS ManagedEntityId,
 	bme.DisplayName AS ManagedEntity,
 	%s AS HealthState,
 	s.LastModified,
@@ -54,12 +55,45 @@ ORDER BY bme.DisplayName`, healthStateCase("mos", "s.HealthState"), healthScopeT
 	return query, args
 }
 
+// healthTreeDrilldownLink builds a DataLink that opens Grafana Explore with
+// a Health Tree query (QueryTypeHealthTree) pre-populated for one managed
+// entity, so a Health query's results can drill straight into the same
+// monitor tree SCOM's own Health Explorer shows for that object. The
+// ${__data.fields.X} placeholders are filled in by Grafana at click time
+// from the row the link came from — see the managedEntityId/managedEntity
+// fields on the "health" frame below. datasourceUID is this data source
+// instance's own UID (see Run), needed since the link targets this same
+// data source; returns nil when it's unset (e.g. a test calling
+// QueryHealthCurrent directly) rather than emit a link Explore would reject
+// for having no target datasource.
+func healthTreeDrilldownLink(datasourceUID string) *data.DataLink {
+	if datasourceUID == "" {
+		return nil
+	}
+	return &data.DataLink{
+		Title: "View health tree",
+		Internal: &data.InternalDataLink{
+			DatasourceUID: datasourceUID,
+			Query: map[string]any{
+				"refId":     "A",
+				"queryType": string(QueryTypeHealthTree),
+				"instances": []map[string]string{{
+					"value": "${__data.fields.managedEntityId}",
+					"label": "${__data.fields.managedEntity}",
+				}},
+			},
+		},
+	}
+}
+
 // QueryHealthCurrent reads dbo.State on the Operational DB for the current
 // overall health of the selected instances — the entity's health rollup
 // monitor (System.Health.EntityState, looked up via
 // dbo.fn_ManagedTypeId_SystemHealthEntityState()) rather than every
-// individual component monitor underneath it.
-func QueryHealthCurrent(ctx context.Context, db *sql.DB, instanceIDs []string) (*data.Frame, error) {
+// individual component monitor underneath it. datasourceUID wires up the
+// health tree drilldown link on the managedEntity field — see
+// healthTreeDrilldownLink.
+func QueryHealthCurrent(ctx context.Context, db *sql.DB, instanceIDs []string, datasourceUID string) (*data.Frame, error) {
 	if len(instanceIDs) == 0 {
 		return nil, nil
 	}
@@ -71,18 +105,19 @@ func QueryHealthCurrent(ctx context.Context, db *sql.DB, instanceIDs []string) (
 	}
 	defer func() { _ = rows.Close() }()
 
-	var entities, healthStates []string
+	var entityIDs, entities, healthStates []string
 	var lastModified []time.Time
 	var inMaintenance []bool
 
 	for rows.Next() {
-		var entity, healthState string
+		var entityID, entity, healthState string
 		var modified time.Time
 		var maint sql.NullBool
 
-		if err := rows.Scan(&entity, &healthState, &modified, &maint); err != nil {
+		if err := rows.Scan(&entityID, &entity, &healthState, &modified, &maint); err != nil {
 			return nil, err
 		}
+		entityIDs = append(entityIDs, entityID)
 		entities = append(entities, entity)
 		healthStates = append(healthStates, healthState)
 		lastModified = append(lastModified, modified)
@@ -92,9 +127,15 @@ func QueryHealthCurrent(ctx context.Context, db *sql.DB, instanceIDs []string) (
 		return nil, err
 	}
 
+	managedEntityField := data.NewField("managedEntity", nil, entities)
+	if link := healthTreeDrilldownLink(datasourceUID); link != nil {
+		managedEntityField.Config = &data.FieldConfig{Links: []data.DataLink{*link}}
+	}
+
 	frame := data.NewFrame("health",
 		data.NewField("time", nil, lastModified),
-		data.NewField("managedEntity", nil, entities),
+		data.NewField("managedEntityId", nil, entityIDs),
+		managedEntityField,
 		data.NewField("healthState", nil, healthStates),
 		data.NewField("inMaintenanceMode", nil, inMaintenance),
 	)

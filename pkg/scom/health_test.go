@@ -16,6 +16,7 @@ func TestBuildHealthCurrentQuery(t *testing.T) {
 
 	wantContain := []string{
 		"FROM dbo.State s",
+		"CONVERT(varchar(64), bme.BaseManagedEntityId) AS ManagedEntityId",
 		"INNER JOIN dbo.BaseManagedEntity bme ON s.BaseManagedEntityId = bme.BaseManagedEntityId",
 		// Overall health only: scoped to the entity's health rollup monitor,
 		// not joined against every component monitor.
@@ -82,4 +83,32 @@ func TestBuildHealthHistoryQuery(t *testing.T) {
 	if len(args) != 3 { // from, to, idScopeValues
 		t.Fatalf("got %d args, want 3", len(args))
 	}
+}
+
+func TestHealthTreeDrilldownLink(t *testing.T) {
+	t.Run("no datasource UID means no link", func(t *testing.T) {
+		if link := healthTreeDrilldownLink(""); link != nil {
+			t.Fatalf("got link=%+v, want nil when datasourceUID is unset", link)
+		}
+	})
+
+	t.Run("populated UID builds an Explore link targeting a health-tree query", func(t *testing.T) {
+		link := healthTreeDrilldownLink("uid-1")
+		if link == nil {
+			t.Fatal("got nil link, want one")
+		}
+		if link.Internal == nil {
+			t.Fatal("got no Internal link, want one targeting Explore")
+		}
+		if link.Internal.DatasourceUID != "uid-1" {
+			t.Errorf("got DatasourceUID=%q, want %q", link.Internal.DatasourceUID, "uid-1")
+		}
+		query, ok := link.Internal.Query.(map[string]any)
+		if !ok {
+			t.Fatalf("Query is %T, want map[string]any", link.Internal.Query)
+		}
+		if query["queryType"] != string(QueryTypeHealthTree) {
+			t.Errorf("got queryType=%v, want %q", query["queryType"], QueryTypeHealthTree)
+		}
+	})
 }

@@ -50,20 +50,27 @@ func (d *Datasource) Dispose() {
 func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	response := backend.NewQueryDataResponse()
 
+	// The health tree drilldown link (see scom.QueryHealthCurrent) needs this
+	// data source instance's own UID to target itself when opening Explore.
+	var datasourceUID string
+	if req.PluginContext.DataSourceInstanceSettings != nil {
+		datasourceUID = req.PluginContext.DataSourceInstanceSettings.UID
+	}
+
 	for _, q := range req.Queries {
-		response.Responses[q.RefID] = d.query(ctx, q)
+		response.Responses[q.RefID] = d.query(ctx, datasourceUID, q)
 	}
 
 	return response, nil
 }
 
-func (d *Datasource) query(ctx context.Context, query backend.DataQuery) backend.DataResponse {
+func (d *Datasource) query(ctx context.Context, datasourceUID string, query backend.DataQuery) backend.DataResponse {
 	var qm scom.QueryModel
 	if err := json.Unmarshal(query.JSON, &qm); err != nil {
 		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
 	}
 
-	frames, err := scom.Run(ctx, d.db, qm, query.TimeRange.From, query.TimeRange.To)
+	frames, err := scom.Run(ctx, d.db, qm, query.TimeRange.From, query.TimeRange.To, datasourceUID)
 	if err != nil {
 		return backend.ErrDataResponse(backend.StatusInternal, err.Error())
 	}

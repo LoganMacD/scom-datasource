@@ -42,7 +42,7 @@ export interface MySecureJsonData {
   warehousePassword?: string;
 }
 
-export type SCOMQueryType = 'performance' | 'alerts' | 'health' | 'properties';
+export type SCOMQueryType = 'performance' | 'alerts' | 'health' | 'properties' | 'health-tree';
 
 export type ClassSearchBy = 'name' | 'displayName';
 
@@ -71,6 +71,11 @@ export interface MyQuery extends DataQuery {
   queryType: SCOMQueryType;
   class?: ResourceRef;
   group?: ResourceRef;
+  // 'health-tree' is the one query type that requires exactly one instance
+  // here (see filterQuery in datasource.ts and healthTreeInstanceID in
+  // pkg/scom/query.go) — it renders a single object's full SCOM monitor
+  // tree, unlike every other query type where "zero instances" means
+  // "everything in scope."
   instances?: ResourceRef[];
   // Performance counters are picked in three steps: object (e.g. "Process"),
   // then counter name (e.g. "Working Set") within that object, then

@@ -15,6 +15,11 @@ const (
 	QueryTypeAlerts      QueryType = "alerts"
 	QueryTypeHealth      QueryType = "health"
 	QueryTypeProperties  QueryType = "properties"
+	// QueryTypeHealthTree renders one managed entity's full SCOM monitor
+	// hierarchy (like SCOM's own Health Explorer) via QueryHealthTree. Unlike
+	// every other query type, it requires exactly one instance — see
+	// healthTreeInstanceID.
+	QueryTypeHealthTree QueryType = "health-tree"
 )
 
 // ResourceRef mirrors src/types.ts's ResourceRef: a {value,label} pair so
@@ -89,10 +94,27 @@ func refValues(refs []ResourceRef) []string {
 	return out
 }
 
+// healthTreeInstanceID picks the single instance a health tree query is
+// scoped to. Split out from the QueryTypeHealthTree case below so this
+// validation is directly testable without a live DB — see query_test.go.
+// Unlike every other query type (which treats "no instances narrowed"
+// as "every instance in scope"), a health tree is inherently about one
+// object, so both zero and more-than-one are rejected rather than silently
+// picking a subset.
+func healthTreeInstanceID(instanceIDs []string) (string, error) {
+	if len(instanceIDs) != 1 {
+		return "", fmt.Errorf("health tree requires exactly one instance, got %d", len(instanceIDs))
+	}
+	return instanceIDs[0], nil
+}
+
 // Run dispatches a query model to the right domain query against the
 // appropriate connection (Operational DB for alerts/health/properties, the
-// Data Warehouse for performance).
-func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time) ([]*data.Frame, error) {
+// Data Warehouse for performance). datasourceUID is this data source
+// instance's own UID (from the request's PluginContext, threaded down from
+// QueryData) — QueryHealthCurrent needs it to build the health tree
+// drilldown link, which points back at this same data source.
+func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time, datasourceUID string) ([]*data.Frame, error) {
 	instanceIDs := refValues(qm.Instances)
 	counterIDs := refValues(qm.Counters)
 
@@ -191,7 +213,7 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time) ([]*dat
 	case QueryTypeHealth:
 		var frames []*data.Frame
 		if qm.HealthMode.includesCurrent() {
-			current, err := QueryHealthCurrent(ctx, db.Operational, instanceIDs)
+			current, err := QueryHealthCurrent(ctx, db.Operational, instanceIDs, datasourceUID)
 			if err != nil {
 				return nil, err
 			}
@@ -209,6 +231,13 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time) ([]*dat
 			}
 		}
 		return frames, nil
+
+	case QueryTypeHealthTree:
+		entityID, err := healthTreeInstanceID(instanceIDs)
+		if err != nil {
+			return nil, err
+		}
+		return QueryHealthTree(ctx, db.Operational, entityID)
 
 	case QueryTypeProperties:
 		return QueryProperties(ctx, db.Operational, instanceIDs, qm.PropertyNames)

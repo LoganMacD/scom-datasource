@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { QueryEditorProps, SelectableValue } from '@grafana/data';
-import { InlineField, RadioButtonGroup, Stack } from '@grafana/ui';
+import { Alert, InlineField, RadioButtonGroup, Stack } from '@grafana/ui';
 import { DataSource } from '../datasource';
 import { HealthMode, MyDataSourceOptions, MyQuery, ResourceRef } from '../types';
 import { ClassGroupPicker } from './ClassGroupPicker';
@@ -16,6 +16,7 @@ const QUERY_TYPE_OPTIONS: Array<SelectableValue<MyQuery['queryType']>> = [
   { label: 'Alerts', value: 'alerts' },
   { label: 'Health', value: 'health' },
   { label: 'Properties', value: 'properties' },
+  { label: 'Health Tree', value: 'health-tree' },
 ];
 
 // 'Current' is a snapshot (one row per instance) — the natural fit for a
@@ -103,6 +104,10 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             onChange={(v) => updateAndRun({ healthMode: v ?? 'both' })}
           />
         </InlineField>
+      )}
+
+      {query.queryType === 'health-tree' && (query.instances?.length ?? 0) !== 1 && (
+        <Alert severity="info" title="Select exactly one instance above to view its health tree" />
       )}
 
       {query.queryType === 'alerts' && (
