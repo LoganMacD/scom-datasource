@@ -103,20 +103,16 @@ ORDER BY p.PerformanceRuleInstanceRowId, me.ManagedEntityGuid, p.DateTime`, valu
 	return query, args, nil
 }
 
-// seriesLabelMacros lists the placeholders seriesLabel substitutes in a
-// user-supplied legendFormat. Kept alongside seriesLabel so the query
-// editor's help text (src/components/CounterPicker.tsx) has one place to
-// stay in sync with.
-const seriesLabelMacros = "{{object}}, {{counter}}, {{instance}}, {{entity}}"
-
 // seriesLabel renders a performance series' legend. The built-in default —
 // "Object - Counter (Entity)", or "Object - Counter [Instance] (Entity)"
 // when the counter has a named instance — reads every field there is,
 // which gets unwieldy fast (e.g. a LogicalDisk counter against a
 // long FQDN: "LogicalDisk - % Free Space [C:] (server01.contoso.example.com)").
 // legendFormat lets a query override that with its own template using the
-// macros in seriesLabelMacros; instanceName substitutes as "" for a counter
-// with no instance, same as it's omitted from the default format.
+// {{object}}, {{counter}}, {{instance}}, {{entity}} macros (kept in sync
+// with the query editor's help text in src/components/CounterPicker.tsx);
+// instanceName substitutes as "" for a counter with no instance, same as
+// it's omitted from the default format.
 func seriesLabel(legendFormat, objectName, counterName, instanceName, entityName string) string {
 	if legendFormat == "" {
 		if instanceName != "" {
