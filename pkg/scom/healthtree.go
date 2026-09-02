@@ -164,12 +164,69 @@ func healthTreeFrames(rows []healthTreeMonitorRow) []*data.Frame {
 	return []*data.Frame{nodesFrame, edgesFrame}
 }
 
+// filterUnhealthyBranches prunes rows down to monitors that are themselves
+// Warning(2)/Critical(3), plus every ancestor on the path back to the root —
+// matching Health Explorer's own "show only unhealthy" filter. A row that is
+// healthy/not-monitored is dropped unless some descendant of it survived the
+// filter, so the tree structure above a problem is preserved while
+// uninteresting sibling branches disappear.
+func filterUnhealthyBranches(rows []healthTreeMonitorRow) []healthTreeMonitorRow {
+	byID := make(map[string]healthTreeMonitorRow, len(rows))
+	for _, r := range rows {
+		byID[r.MonitorID] = r
+	}
+
+	keep := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		if r.HealthState != 2 && r.HealthState != 3 {
+			continue
+		}
+		for id := r.MonitorID; !keep[id]; {
+			keep[id] = true
+			row, ok := byID[id]
+			if !ok || !row.ParentMonitorID.Valid {
+				break
+			}
+			id = row.ParentMonitorID.String
+		}
+	}
+
+	out := make([]healthTreeMonitorRow, 0, len(rows))
+	for _, r := range rows {
+		if keep[r.MonitorID] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// filterMonitored unconditionally drops monitors in the "Not Monitored"
+// health state (0) — these are monitors disabled for this instance/class
+// and never contribute a real health signal, so they're just noise in the
+// tree. Unlike filterUnhealthyBranches, this doesn't need to preserve
+// ancestor structure: healthTreeFrames already skips an edge whose parent
+// isn't present among the surviving nodes, so a dropped Not Monitored
+// ancestor simply leaves its remaining descendants without an edge to it.
+func filterMonitored(rows []healthTreeMonitorRow) []healthTreeMonitorRow {
+	out := make([]healthTreeMonitorRow, 0, len(rows))
+	for _, r := range rows {
+		if r.HealthState != 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // QueryHealthTree reads dbo.State/dbo.MonitorView on the Operational DB for
 // one managed entity's full monitor hierarchy — every monitor that applies
 // to it, not just the top-level rollup QueryHealthCurrent shows — and
 // renders it as a Grafana Node Graph node/edge frame pair matching what
-// SCOM's own Health Explorer shows for that object.
-func QueryHealthTree(ctx context.Context, db *sql.DB, entityID string) ([]*data.Frame, error) {
+// SCOM's own Health Explorer shows for that object. Not Monitored monitors
+// are always dropped (see filterMonitored). When unhealthyOnly is set, the
+// result is further pruned to Warning/Critical monitors and their ancestor
+// chain — see filterUnhealthyBranches, run first so its ancestor walk still
+// sees any Not Monitored rows needed to reach the root.
+func QueryHealthTree(ctx context.Context, db *sql.DB, entityID string, unhealthyOnly bool) ([]*data.Frame, error) {
 	query, args := buildHealthTreeQuery(entityID)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -192,6 +249,11 @@ func QueryHealthTree(ctx context.Context, db *sql.DB, entityID string) ([]*data.
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+
+	if unhealthyOnly {
+		monitorRows = filterUnhealthyBranches(monitorRows)
+	}
+	monitorRows = filterMonitored(monitorRows)
 
 	return healthTreeFrames(monitorRows), nil
 }

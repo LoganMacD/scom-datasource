@@ -51,6 +51,30 @@ func TestInClause(t *testing.T) {
 	})
 }
 
+func TestSearchLikePattern(t *testing.T) {
+	cases := []struct {
+		name   string
+		search string
+		want   string
+	}{
+		{"plain text becomes a contains match", "cpu", "%cpu%"},
+		{"empty input matches everything", "", "%%"},
+		{"user wildcard * becomes SQL %", "CPU*Time", "%CPU%Time%"},
+		{"user wildcard ? becomes SQL _", "Disk ? Read", "%Disk _ Read%"},
+		{"literal % is escaped, not a wildcard", "100%", `%100\%%`},
+		{"literal _ is escaped, not a wildcard", "a_b", `%a\_b%`},
+		{"literal [ is escaped, not a wildcard", "[test]", `%\[test]%`},
+		{"literal backslash is escaped", `a\b`, `%a\\b%`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := searchLikePattern(c.search); got != c.want {
+				t.Errorf("searchLikePattern(%q) = %q, want %q", c.search, got, c.want)
+			}
+		})
+	}
+}
+
 func TestIDScopeTempTable(t *testing.T) {
 	t.Run("empty values applies no scope", func(t *testing.T) {
 		query, args := idScopeTempTable("#Scope", nil)

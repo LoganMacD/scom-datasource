@@ -167,3 +167,78 @@ func TestHealthTreeFrames(t *testing.T) {
 		}
 	})
 }
+
+func TestFilterUnhealthyBranches(t *testing.T) {
+	// root -> availability (healthy) -> disk-c (critical)
+	// root -> performance (healthy) -> counter-x (healthy)
+	// A sibling branch (performance/counter-x) that's entirely healthy must
+	// be dropped, while the ancestor chain above the critical monitor
+	// (root, availability) must survive even though root/availability are
+	// healthy themselves.
+	rows := []healthTreeMonitorRow{
+		{MonitorID: "root", HealthState: 1},
+		{MonitorID: "availability", ParentMonitorID: sql.NullString{String: "root", Valid: true}, HealthState: 1},
+		{MonitorID: "disk-c", ParentMonitorID: sql.NullString{String: "availability", Valid: true}, HealthState: 3},
+		{MonitorID: "performance", ParentMonitorID: sql.NullString{String: "root", Valid: true}, HealthState: 1},
+		{MonitorID: "counter-x", ParentMonitorID: sql.NullString{String: "performance", Valid: true}, HealthState: 1},
+		{MonitorID: "not-monitored", ParentMonitorID: sql.NullString{String: "root", Valid: true}, HealthState: 0},
+	}
+
+	got := filterUnhealthyBranches(rows)
+
+	gotIDs := make(map[string]bool, len(got))
+	for _, r := range got {
+		gotIDs[r.MonitorID] = true
+	}
+	wantIDs := []string{"root", "availability", "disk-c"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("got %d rows %v, want %d rows %v", len(got), gotIDs, len(wantIDs), wantIDs)
+	}
+	for _, id := range wantIDs {
+		if !gotIDs[id] {
+			t.Errorf("missing expected row %q in filtered result %v", id, gotIDs)
+		}
+	}
+
+	t.Run("all-healthy tree filters down to nothing", func(t *testing.T) {
+		allHealthy := []healthTreeMonitorRow{
+			{MonitorID: "root", HealthState: 1},
+			{MonitorID: "availability", ParentMonitorID: sql.NullString{String: "root", Valid: true}, HealthState: 1},
+		}
+		if got := filterUnhealthyBranches(allHealthy); len(got) != 0 {
+			t.Errorf("got %d rows, want 0", len(got))
+		}
+	})
+}
+
+func TestFilterMonitored(t *testing.T) {
+	rows := []healthTreeMonitorRow{
+		{MonitorID: "root", HealthState: 1},
+		{MonitorID: "disabled-child", ParentMonitorID: sql.NullString{String: "root", Valid: true}, HealthState: 0},
+		{MonitorID: "disk-c", ParentMonitorID: sql.NullString{String: "disabled-child", Valid: true}, HealthState: 3},
+	}
+
+	got := filterMonitored(rows)
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want 2 (root, disk-c)", len(got))
+	}
+	for _, r := range got {
+		if r.MonitorID == "disabled-child" {
+			t.Errorf("Not Monitored row %q should have been dropped", r.MonitorID)
+		}
+	}
+
+	// Dropping "disabled-child" orphans disk-c's parent link — healthTreeFrames
+	// already tolerates this (see the "dangling parent" case in
+	// TestHealthTreeFrames), so disk-c should still come through as a node,
+	// just without an edge back to root.
+	frames := healthTreeFrames(got)
+	nodeIDField, _ := frames[0].FieldByName("id")
+	if nodeIDField.Len() != 2 {
+		t.Fatalf("got %d nodes, want 2", nodeIDField.Len())
+	}
+	edgeIDField, _ := frames[1].FieldByName("id")
+	if edgeIDField.Len() != 0 {
+		t.Errorf("got %d edges, want 0 since disk-c's parent was dropped", edgeIDField.Len())
+	}
+}

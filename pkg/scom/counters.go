@@ -43,7 +43,7 @@ func counterScopeClause(instanceIDs []string) (setupSQL, existsClause string, ar
 // like SearchCounterNames/SearchCounterInstances below.
 func SearchCounterObjects(ctx context.Context, db *sql.DB, instanceIDs []string, search string) ([]Option, error) {
 	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
-	args := append([]any{sql.Named("search", search)}, scopeArgs...)
+	args := append([]any{sql.Named("search", searchLikePattern(search))}, scopeArgs...)
 
 	query := setupSQL + fmt.Sprintf(`
 SELECT DISTINCT TOP %d
@@ -51,7 +51,7 @@ SELECT DISTINCT TOP %d
 	pr.ObjectName AS Label
 FROM dbo.vPerformanceRule pr
 INNER JOIN dbo.vPerformanceRuleInstance pri ON pri.RuleRowId = pr.RuleRowId
-WHERE pr.ObjectName LIKE @search + '%%'%s
+WHERE pr.ObjectName LIKE @search ESCAPE '\'%s
 ORDER BY pr.ObjectName`, defaultSearchLimit, scopeClause)
 
 	return runOptionsQuery(ctx, db, query, args)
@@ -62,7 +62,7 @@ ORDER BY pr.ObjectName`, defaultSearchLimit, scopeClause)
 // (e.g. "Working Set", "% Processor Time") for that object.
 func SearchCounterNames(ctx context.Context, db *sql.DB, instanceIDs []string, object, search string) ([]Option, error) {
 	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
-	args := append([]any{sql.Named("search", search), sql.Named("object", object)}, scopeArgs...)
+	args := append([]any{sql.Named("search", searchLikePattern(search)), sql.Named("object", object)}, scopeArgs...)
 
 	query := setupSQL + fmt.Sprintf(`
 SELECT DISTINCT TOP %d
@@ -70,7 +70,7 @@ SELECT DISTINCT TOP %d
 	pr.CounterName AS Label
 FROM dbo.vPerformanceRule pr
 INNER JOIN dbo.vPerformanceRuleInstance pri ON pri.RuleRowId = pr.RuleRowId
-WHERE pr.ObjectName = @object AND pr.CounterName LIKE @search + '%%'%s
+WHERE pr.ObjectName = @object AND pr.CounterName LIKE @search ESCAPE '\'%s
 ORDER BY pr.CounterName`, defaultSearchLimit, scopeClause)
 
 	return runOptionsQuery(ctx, db, query, args)
@@ -85,7 +85,7 @@ ORDER BY pr.CounterName`, defaultSearchLimit, scopeClause)
 func SearchCounterInstances(ctx context.Context, db *sql.DB, instanceIDs []string, object, counterName, search string) ([]Option, error) {
 	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
 	args := append([]any{
-		sql.Named("search", search),
+		sql.Named("search", searchLikePattern(search)),
 		sql.Named("object", object),
 		sql.Named("counterName", counterName),
 	}, scopeArgs...)
@@ -98,7 +98,7 @@ SELECT TOP %d
 FROM dbo.vPerformanceRuleInstance pri
 INNER JOIN dbo.vPerformanceRule pr ON pri.RuleRowId = pr.RuleRowId
 WHERE pr.ObjectName = @object AND pr.CounterName = @counterName
-	AND pri.InstanceName LIKE @search + '%%'%s
+	AND pri.InstanceName LIKE @search ESCAPE '\'%s
 ORDER BY pri.InstanceName`, defaultSearchLimit, scopeClause)
 
 	return runOptionsQuery(ctx, db, query, args)

@@ -34,6 +34,44 @@ func inClause(prefix string, values []string) (string, []any) {
 	return "(" + strings.Join(placeholders, ", ") + ")", args
 }
 
+// searchLikeEscape is the ESCAPE character every LIKE clause built with
+// searchLikePattern must declare (via `LIKE @search ESCAPE '\'`), so the
+// literal escaping below is actually honored by SQL Server rather than
+// silently ignored.
+const searchLikeEscape = `\`
+
+// searchLikePattern turns free-text search input from the query editor into
+// a SQL LIKE pattern that matches anywhere in the target column, not just as
+// a prefix — so e.g. searching "cpu" finds "Processor - % CPU Time" — while
+// letting a user type their own '*'/'?' wildcards for a more targeted
+// pattern (e.g. "CPU*Time" or "Disk ? Read"), same as a shell glob. Any
+// literal '\', '%', '_', or '[' already in the input is escaped first so it
+// isn't misread as a SQL wildcard; only then are '*'/'?' translated to their
+// SQL LIKE equivalents ('%'/'_') and the whole thing wrapped in '%...%' for
+// the contains match. The wrap is harmless even when the user's own pattern
+// already starts or ends with a wildcard, since '%' is idempotent next to
+// another '%'.
+func searchLikePattern(search string) string {
+	var b strings.Builder
+	b.Grow(len(search) + 2)
+	b.WriteByte('%')
+	for _, r := range search {
+		switch r {
+		case '\\', '%', '_', '[':
+			b.WriteString(searchLikeEscape)
+			b.WriteRune(r)
+		case '*':
+			b.WriteByte('%')
+		case '?':
+			b.WriteByte('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('%')
+	return b.String()
+}
+
 // idScopeParamName is the fixed name of the single string parameter
 // idScopeTempTable binds, regardless of how many ids are in the list.
 const idScopeParamName = "idScopeValues"

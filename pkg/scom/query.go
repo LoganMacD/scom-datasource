@@ -51,6 +51,11 @@ type QueryModel struct {
 	AlertSource     AlertSource `json:"alertSource"`
 	PropertyNames   []string    `json:"propertyNames"`
 	HealthMode      HealthMode  `json:"healthMode"`
+	// UnhealthyOnly prunes a health tree query's result down to monitors that
+	// are themselves Warning/Critical, plus their ancestor chain up to the
+	// root — see filterUnhealthyBranches in healthtree.go. Ignored by every
+	// other query type.
+	UnhealthyOnly bool `json:"unhealthyOnly"`
 }
 
 // AlertSource selects which database an alerts query reads from. The zero
@@ -117,6 +122,17 @@ func healthTreeInstanceID(instanceIDs []string) (string, error) {
 func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time, datasourceUID string) ([]*data.Frame, error) {
 	instanceIDs := refValues(qm.Instances)
 	counterIDs := refValues(qm.Counters)
+
+	// A health tree query scoped to a group with no instances narrowed down
+	// shows the health of the group itself — a SCOM group is itself a
+	// managed entity with its own health rollup — rather than requiring the
+	// user to pick one specific member out of the group. This must be
+	// checked before the general instance-scope resolution below, which
+	// would otherwise expand the group into every one of its members and
+	// trip healthTreeInstanceID's "exactly one instance" check.
+	if qm.QueryType == QueryTypeHealthTree && len(instanceIDs) == 0 && qm.Group != nil {
+		return QueryHealthTree(ctx, db.Operational, qm.Group.Value, qm.UnhealthyOnly)
+	}
 
 	// No instances explicitly picked: fall back to every instance in the
 	// chosen class/group scope, rather than treating it as "no data." This
@@ -237,7 +253,7 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time, datasou
 		if err != nil {
 			return nil, err
 		}
-		return QueryHealthTree(ctx, db.Operational, entityID)
+		return QueryHealthTree(ctx, db.Operational, entityID, qm.UnhealthyOnly)
 
 	case QueryTypeProperties:
 		return QueryProperties(ctx, db.Operational, instanceIDs, qm.PropertyNames)

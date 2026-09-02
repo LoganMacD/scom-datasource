@@ -71,11 +71,13 @@ export interface MyQuery extends DataQuery {
   queryType: SCOMQueryType;
   class?: ResourceRef;
   group?: ResourceRef;
-  // 'health-tree' is the one query type that requires exactly one instance
-  // here (see filterQuery in datasource.ts and healthTreeInstanceID in
+  // 'health-tree' normally requires exactly one instance here (see
+  // filterQuery in datasource.ts and healthTreeInstanceID in
   // pkg/scom/query.go) — it renders a single object's full SCOM monitor
   // tree, unlike every other query type where "zero instances" means
-  // "everything in scope."
+  // "everything in scope." The one exception is a group scope with no
+  // instances narrowed down: that renders the group's own health rollup
+  // (see the QueryTypeHealthTree branch in pkg/scom/query.go's Run).
   instances?: ResourceRef[];
   // Performance counters are picked in three steps: object (e.g. "Process"),
   // then counter name (e.g. "Working Set") within that object, then
@@ -100,6 +102,11 @@ export interface MyQuery extends DataQuery {
   alertSource?: AlertSource;
   propertyNames?: string[];
   healthMode?: HealthMode;
+  // Prunes a health tree query down to monitors that are themselves
+  // Warning/Critical, plus their ancestor chain back to the root — see
+  // filterUnhealthyBranches in pkg/scom/healthtree.go. Ignored by every
+  // other query type.
+  unhealthyOnly?: boolean;
 }
 
 export const DEFAULT_QUERY: Partial<MyQuery> = {

@@ -48,7 +48,7 @@ INNER JOIN dbo.Relationship rel ON rel.TargetEntityId = bme.BaseManagedEntityId
 // SearchInstances backs the /instances resource endpoint.
 func SearchInstances(ctx context.Context, db *sql.DB, f InstanceFilter) ([]Option, error) {
 	joins, joinArgs := scopeJoins(f.ClassID, f.GroupID)
-	args := append([]any{sql.Named("search", f.Search)}, joinArgs...)
+	args := append([]any{sql.Named("search", searchLikePattern(f.Search))}, joinArgs...)
 
 	query := fmt.Sprintf(`
 SELECT TOP %d
@@ -56,7 +56,7 @@ SELECT TOP %d
 	bme.DisplayName
 FROM dbo.BaseManagedEntity bme%s
 WHERE bme.IsDeleted = 0
-	AND bme.DisplayName LIKE @search + '%%'
+	AND bme.DisplayName LIKE @search ESCAPE '\'
 ORDER BY bme.DisplayName`, defaultSearchLimit, joins)
 
 	rows, err := db.QueryContext(ctx, query, args...)

@@ -7,14 +7,15 @@ import (
 )
 
 // classesQueryByName lists non-abstract SCOM classes (ManagedTypes) whose
-// technical name starts with the search text (e.g. "Microsoft.Windows.Computer").
+// technical name contains the search text (e.g. "Microsoft.Windows.Computer")
+// anywhere, not just as a prefix — see searchLikePattern.
 var classesQueryByName = fmt.Sprintf(`
 SELECT TOP %d
 	CONVERT(varchar(64), ManagedTypeId) AS Id,
 	TypeName
 FROM dbo.ManagedType
 WHERE IsAbstract = 0
-	AND TypeName LIKE @search + '%%'
+	AND TypeName LIKE @search ESCAPE '\'
 ORDER BY TypeName`, defaultSearchLimit)
 
 // classesQueryByDisplayName searches classes by their localized display name
@@ -33,7 +34,7 @@ SELECT TOP %d
 FROM dbo.ManagedTypeView
 WHERE Abstract = 0
 	AND LanguageCode = 'ENU'
-	AND DisplayName LIKE @search + '%%'
+	AND DisplayName LIKE @search ESCAPE '\'
 ORDER BY DisplayName`, defaultSearchLimit)
 
 // SearchBy selects which class field SearchClasses matches the search text
@@ -58,7 +59,7 @@ func classesQueryFor(by SearchBy) string {
 // SearchClasses backs the /classes resource endpoint used by the query
 // editor's class picker.
 func SearchClasses(ctx context.Context, db *sql.DB, search string, by SearchBy) ([]Option, error) {
-	rows, err := db.QueryContext(ctx, classesQueryFor(by), sql.Named("search", search))
+	rows, err := db.QueryContext(ctx, classesQueryFor(by), sql.Named("search", searchLikePattern(search)))
 	if err != nil {
 		return nil, err
 	}

@@ -44,13 +44,14 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
         // chosen class/group; only truly nothing selected is filtered out.
         return !!(query.instances?.length || query.class || query.group);
       case 'health-tree':
-        // The inverse of health/properties: a health tree is inherently
-        // about one object, so it only runs with exactly one instance
-        // picked — a class/group scope resolving to several instances
-        // isn't enough. The backend enforces this too (healthTreeInstanceID
-        // in pkg/scom/query.go), since a drilldown link's query payload
-        // bypasses this frontend check entirely.
-        return query.instances?.length === 1;
+        // A health tree is inherently about one object, so it runs with
+        // exactly one instance picked — a class scope resolving to several
+        // instances isn't enough. The one exception is a group scope with no
+        // instances narrowed down, which shows the group's own health
+        // rollup. The backend enforces both rules too (the QueryTypeHealthTree
+        // branch in pkg/scom/query.go's Run), since a drilldown link's query
+        // payload bypasses this frontend check entirely.
+        return query.instances?.length === 1 || (!!query.group && !query.instances?.length);
       default:
         return false;
     }

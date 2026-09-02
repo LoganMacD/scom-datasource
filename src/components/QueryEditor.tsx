@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { QueryEditorProps, SelectableValue } from '@grafana/data';
-import { Alert, InlineField, RadioButtonGroup, Stack } from '@grafana/ui';
+import { Alert, InlineField, InlineSwitch, RadioButtonGroup, Stack } from '@grafana/ui';
 import { DataSource } from '../datasource';
 import { HealthMode, MyDataSourceOptions, MyQuery, ResourceRef } from '../types';
 import { ClassGroupPicker } from './ClassGroupPicker';
@@ -106,8 +106,21 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
         </InlineField>
       )}
 
-      {query.queryType === 'health-tree' && (query.instances?.length ?? 0) !== 1 && (
-        <Alert severity="info" title="Select exactly one instance above to view its health tree" />
+      {query.queryType === 'health-tree' && (
+        <>
+          {(query.instances?.length ?? 0) !== 1 && !(query.group && !query.instances?.length) && (
+            <Alert
+              severity="info"
+              title="Select exactly one instance above, or a group with no instances to view the group's own health, to view a health tree"
+            />
+          )}
+          <InlineField label="Unhealthy only" labelWidth={14} tooltip="Show only monitors in a Warning or Critical state, plus their parent chain">
+            <InlineSwitch
+              value={!!query.unhealthyOnly}
+              onChange={(e) => updateAndRun({ unhealthyOnly: e.currentTarget.checked })}
+            />
+          </InlineField>
+        </>
       )}
 
       {query.queryType === 'alerts' && (

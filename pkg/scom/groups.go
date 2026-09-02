@@ -19,13 +19,13 @@ INNER JOIN dbo.DerivedManagedTypes dmt ON bme.BaseManagedTypeId = dmt.DerivedTyp
 INNER JOIN dbo.ManagedType mt ON dmt.BaseTypeId = mt.ManagedTypeId
 WHERE mt.TypeName = 'Microsoft.SystemCenter.InstanceGroup'
 	AND bme.IsDeleted = 0
-	AND bme.DisplayName LIKE @search + '%%'
+	AND bme.DisplayName LIKE @search ESCAPE '\'
 ORDER BY bme.DisplayName`, defaultSearchLimit)
 
 // SearchGroups backs the /groups resource endpoint used by the query
 // editor's group picker.
 func SearchGroups(ctx context.Context, db *sql.DB, search string) ([]Option, error) {
-	rows, err := db.QueryContext(ctx, groupsQuery, sql.Named("search", search))
+	rows, err := db.QueryContext(ctx, groupsQuery, sql.Named("search", searchLikePattern(search)))
 	if err != nil {
 		return nil, err
 	}
