@@ -90,12 +90,14 @@ SELECT
 	pr.CounterName,
 	pri.InstanceName,
 	me.ManagedEntityDefaultName,
+	tme.ManagedEntityDefaultName AS HostDisplayName,
 	p.DateTime,
 	p.%s AS Value
 FROM %s p
 INNER JOIN dbo.vPerformanceRuleInstance pri ON p.PerformanceRuleInstanceRowId = pri.PerformanceRuleInstanceRowId
 INNER JOIN dbo.vPerformanceRule pr ON pri.RuleRowId = pr.RuleRowId
 INNER JOIN dbo.vManagedEntity me ON p.ManagedEntityRowId = me.ManagedEntityRowId
+LEFT JOIN dbo.vManagedEntity tme ON tme.ManagedEntityRowId = COALESCE(me.TopLevelHostManagedEntityRowId, me.ManagedEntityRowId)
 WHERE p.PerformanceRuleInstanceRowId IN %s
 	AND p.DateTime >= @from AND p.DateTime <= @to%s
 ORDER BY p.PerformanceRuleInstanceRowId, me.ManagedEntityGuid, p.DateTime`, valueColumn, table, inSQL, entityFilter)
@@ -109,11 +111,20 @@ ORDER BY p.PerformanceRuleInstanceRowId, me.ManagedEntityGuid, p.DateTime`, valu
 // which gets unwieldy fast (e.g. a LogicalDisk counter against a
 // long FQDN: "LogicalDisk - % Free Space [C:] (server01.contoso.example.com)").
 // legendFormat lets a query override that with its own template using the
-// {{object}}, {{counter}}, {{instance}}, {{entity}} macros (kept in sync
-// with the query editor's help text in src/components/CounterPicker.tsx);
-// instanceName substitutes as "" for a counter with no instance, same as
-// it's omitted from the default format.
-func seriesLabel(legendFormat, objectName, counterName, instanceName, entityName string) string {
+// {{object}}, {{counter}}, {{instance}}, {{entity}}, {{host}} macros (kept in
+// sync with the query editor's help text in
+// src/components/CounterPicker.tsx); instanceName substitutes as "" for a
+// counter with no instance, same as it's omitted from the default format.
+// entityName is the managed entity the counter was collected against (e.g.
+// a "Processor Information" object instance), which for a hosted object is
+// often not the computer itself — hostName is that object's top-level
+// hosting entity's display name (typically the computer), falling back to
+// entityName when the entity has no distinct host (it is itself top-level).
+func seriesLabel(legendFormat, objectName, counterName, instanceName, entityName, hostName string) string {
+	if hostName == "" {
+		hostName = entityName
+	}
+
 	if legendFormat == "" {
 		if instanceName != "" {
 			return fmt.Sprintf("%s - %s [%s] (%s)", objectName, counterName, instanceName, entityName)
@@ -126,6 +137,7 @@ func seriesLabel(legendFormat, objectName, counterName, instanceName, entityName
 		"{{counter}}", counterName,
 		"{{instance}}", instanceName,
 		"{{entity}}", entityName,
+		"{{host}}", hostName,
 	)
 	return replacer.Replace(legendFormat)
 }
@@ -168,11 +180,11 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, enti
 
 	for rows.Next() {
 		var ruleInstanceID, managedEntityID, objectName, counterName, entityName string
-		var instanceName sql.NullString
+		var instanceName, hostName sql.NullString
 		var ts time.Time
 		var value float64
 
-		if err := rows.Scan(&ruleInstanceID, &managedEntityID, &objectName, &counterName, &instanceName, &entityName, &ts, &value); err != nil {
+		if err := rows.Scan(&ruleInstanceID, &managedEntityID, &objectName, &counterName, &instanceName, &entityName, &hostName, &ts, &value); err != nil {
 			return nil, err
 		}
 
@@ -183,7 +195,7 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, enti
 		key := seriesKey{ruleInstanceID: ruleInstanceID, managedEntityID: managedEntityID}
 		s, ok := seriesByKey[key]
 		if !ok {
-			label := seriesLabel(legendFormat, objectName, counterName, instanceName.String, entityName)
+			label := seriesLabel(legendFormat, objectName, counterName, instanceName.String, entityName, hostName.String)
 			s = &series{label: label}
 			seriesByKey[key] = s
 			order = append(order, key)

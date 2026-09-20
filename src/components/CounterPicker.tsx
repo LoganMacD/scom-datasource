@@ -143,11 +143,11 @@ export function CounterPicker({
         label="Legend"
         labelWidth={14}
         grow
-        tooltip="Customize the series legend. Available macros: {{object}}, {{counter}}, {{instance}}, {{entity}}. Leave blank for the default: Object - Counter [Instance] (Entity)."
+        tooltip="Customize the series legend. Available macros: {{object}}, {{counter}}, {{instance}}, {{entity}}, {{host}}. {{entity}} is the object the counter was collected against (e.g. a Processor Information instance); {{host}} is that object's top-level hosting entity (typically the computer). Leave blank for the default: Object - Counter [Instance] (Entity)."
       >
         <Input
           value={legendFormat ?? ''}
-          placeholder="{{object}} - {{counter}} [{{instance}}] ({{entity}})"
+          placeholder="{{object}} - {{counter}} [{{instance}}] ({{entity}}) on {{host}}"
           onChange={(e: ChangeEvent<HTMLInputElement>) => onLegendFormatChange(e.target.value)}
           onBlur={onRunQuery}
         />

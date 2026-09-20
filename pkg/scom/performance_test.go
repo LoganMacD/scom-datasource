@@ -53,8 +53,12 @@ func TestBuildPerformanceQuery(t *testing.T) {
 		}
 		if !strings.Contains(query, "INNER JOIN dbo.vPerformanceRuleInstance pri ON p.PerformanceRuleInstanceRowId = pri.PerformanceRuleInstanceRowId") ||
 			!strings.Contains(query, "INNER JOIN dbo.vPerformanceRule pr ON pri.RuleRowId = pr.RuleRowId") ||
-			!strings.Contains(query, "INNER JOIN dbo.vManagedEntity me ON p.ManagedEntityRowId = me.ManagedEntityRowId") {
+			!strings.Contains(query, "INNER JOIN dbo.vManagedEntity me ON p.ManagedEntityRowId = me.ManagedEntityRowId") ||
+			!strings.Contains(query, "LEFT JOIN dbo.vManagedEntity tme ON tme.ManagedEntityRowId = COALESCE(me.TopLevelHostManagedEntityRowId, me.ManagedEntityRowId)") {
 			t.Errorf("query missing expected joins: %s", query)
+		}
+		if !strings.Contains(query, "tme.ManagedEntityDefaultName AS HostDisplayName") {
+			t.Errorf("query missing top-level host display name column: %s", query)
 		}
 		if !strings.Contains(query, "CONVERT(varchar(64), me.ManagedEntityGuid) AS ManagedEntityGuid") {
 			t.Errorf("query missing managed entity guid column: %s", query)
@@ -114,7 +118,7 @@ func TestBuildPerformanceQuery(t *testing.T) {
 
 func TestSeriesLabel(t *testing.T) {
 	t.Run("empty legendFormat falls back to the built-in default", func(t *testing.T) {
-		got := seriesLabel("", "LogicalDisk", "% Free Space", "C:", "server01.contoso.example.com")
+		got := seriesLabel("", "LogicalDisk", "% Free Space", "C:", "server01.contoso.example.com", "server01.contoso.example.com")
 		want := "LogicalDisk - % Free Space [C:] (server01.contoso.example.com)"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -122,7 +126,7 @@ func TestSeriesLabel(t *testing.T) {
 	})
 
 	t.Run("empty legendFormat omits the instance segment when there's no instance", func(t *testing.T) {
-		got := seriesLabel("", "Memory", "Available Bytes", "", "server01.contoso.example.com")
+		got := seriesLabel("", "Memory", "Available Bytes", "", "server01.contoso.example.com", "server01.contoso.example.com")
 		want := "Memory - Available Bytes (server01.contoso.example.com)"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -130,25 +134,32 @@ func TestSeriesLabel(t *testing.T) {
 	})
 
 	t.Run("legendFormat substitutes every macro", func(t *testing.T) {
-		got := seriesLabel("{{entity}}: {{object}}/{{counter}} [{{instance}}]", "LogicalDisk", "% Free Space", "C:", "server01")
-		want := "server01: LogicalDisk/% Free Space [C:]"
+		got := seriesLabel("{{entity}} on {{host}}: {{object}}/{{counter}} [{{instance}}]", "LogicalDisk", "% Free Space", "C:", "LogicalDisk C:", "server01")
+		want := "LogicalDisk C: on server01: LogicalDisk/% Free Space [C:]"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}
 	})
 
 	t.Run("legendFormat with no macros passes through unchanged", func(t *testing.T) {
-		got := seriesLabel("fixed label", "LogicalDisk", "% Free Space", "C:", "server01")
+		got := seriesLabel("fixed label", "LogicalDisk", "% Free Space", "C:", "server01", "server01")
 		if got != "fixed label" {
 			t.Errorf("got %q, want %q", got, "fixed label")
 		}
 	})
 
 	t.Run("legendFormat referencing a macro for missing data substitutes empty string", func(t *testing.T) {
-		got := seriesLabel("{{object}} [{{instance}}]", "Memory", "Available Bytes", "", "server01")
+		got := seriesLabel("{{object}} [{{instance}}]", "Memory", "Available Bytes", "", "server01", "server01")
 		want := "Memory []"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty hostName falls back to entityName", func(t *testing.T) {
+		got := seriesLabel("{{host}}", "LogicalDisk", "% Free Space", "C:", "server01", "")
+		if got != "server01" {
+			t.Errorf("got %q, want %q", got, "server01")
 		}
 	})
 }
