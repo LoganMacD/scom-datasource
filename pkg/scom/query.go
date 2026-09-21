@@ -124,14 +124,23 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time, datasou
 	counterIDs := refValues(qm.Counters)
 
 	// A health tree query scoped to a group with no instances narrowed down
-	// shows the health of the group itself — a SCOM group is itself a
-	// managed entity with its own health rollup — rather than requiring the
-	// user to pick one specific member out of the group. This must be
-	// checked before the general instance-scope resolution below, which
-	// would otherwise expand the group into every one of its members and
-	// trip healthTreeInstanceID's "exactly one instance" check.
+	// is rooted at the group itself — a SCOM group is itself a managed
+	// entity with its own health rollup — with every member's monitor tree
+	// hanging underneath, rather than requiring the user to pick one
+	// specific member out of the group. The members have to be resolved and
+	// passed down explicitly: a group entity's own dbo.State rows are just
+	// the five standard System.Health rollups, so a tree built from the
+	// group alone comes back the same three nodes regardless of what the
+	// group contains. This must be checked before the general instance-scope
+	// resolution below, which would flatten the group into its members and
+	// lose the group as the root, tripping healthTreeInstanceID's "exactly
+	// one instance" check on the way.
 	if qm.QueryType == QueryTypeHealthTree && len(instanceIDs) == 0 && qm.Group != nil {
-		return QueryHealthTree(ctx, db.Operational, qm.Group.Value, qm.UnhealthyOnly)
+		memberIDs, err := ResolveInstanceIDs(ctx, db.Operational, "", qm.Group.Value)
+		if err != nil {
+			return nil, fmt.Errorf("resolve group members: %w", err)
+		}
+		return QueryHealthTree(ctx, db.Operational, qm.Group.Value, memberIDs, qm.UnhealthyOnly)
 	}
 
 	// No instances explicitly picked: fall back to every instance in the
@@ -252,7 +261,7 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time, datasou
 		if err != nil {
 			return nil, err
 		}
-		return QueryHealthTree(ctx, db.Operational, entityID, qm.UnhealthyOnly)
+		return QueryHealthTree(ctx, db.Operational, entityID, nil, qm.UnhealthyOnly)
 
 	case QueryTypeProperties:
 		return QueryProperties(ctx, db.Operational, instanceIDs, qm.PropertyNames)

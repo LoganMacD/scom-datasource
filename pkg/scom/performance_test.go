@@ -1,9 +1,12 @@
 package scom
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/grafana/grafana-plugin-sdk-go/data"
 )
 
 func TestAggregationTable(t *testing.T) {
@@ -176,6 +179,60 @@ func TestSeriesLabel(t *testing.T) {
 		got := seriesLabel("{{host}}", "LogicalDisk", "% Free Space", "C:", "server01", "")
 		if got != "server01" {
 			t.Errorf("got %q, want %q", got, "server01")
+		}
+	})
+}
+
+func TestSeriesLabels(t *testing.T) {
+	t.Run("carries every dimension the legend macros expose", func(t *testing.T) {
+		got := seriesLabels("ctr-1", "ent-1", "LogicalDisk", "% Free Space", "C:", "LogicalDisk C: server01", "server01.contoso.example.com")
+		want := data.Labels{
+			"object":    "LogicalDisk",
+			"counter":   "% Free Space",
+			"instance":  "C:",
+			"entity":    "LogicalDisk C: server01",
+			"host":      "server01.contoso.example.com",
+			"counterId": "ctr-1",
+			"entityId":  "ent-1",
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("empty hostName falls back to entityName, same as the legend", func(t *testing.T) {
+		got := seriesLabels("ctr-1", "ent-1", "LogicalDisk", "% Free Space", "C:", "server01", "")
+		if got["host"] != "server01" {
+			t.Errorf("got host %q, want %q", got["host"], "server01")
+		}
+	})
+
+	// A response mixing instanced and non-instanced counters must not hand
+	// Grafana frames with different label *keys* — see seriesLabels.
+	t.Run("instance key is present even when there is no instance", func(t *testing.T) {
+		got := seriesLabels("ctr-1", "ent-1", "Memory", "Available Bytes", "", "server01", "server01")
+		v, ok := got["instance"]
+		if !ok {
+			t.Fatal("instance label is missing entirely, want it present and empty")
+		}
+		if v != "" {
+			t.Errorf("got instance %q, want empty", v)
+		}
+	})
+
+	// Display names are not unique (two cloned agents share one, two MPs can
+	// define the same object+counter), so the ids are what keep two genuinely
+	// distinct series from colliding under the timeseries-multi contract.
+	t.Run("series sharing every display name stay distinct via the ids", func(t *testing.T) {
+		a := seriesLabels("ctr-1", "ent-1", "LogicalDisk", "% Free Space", "C:", "server01", "server01")
+		b := seriesLabels("ctr-1", "ent-2", "LogicalDisk", "% Free Space", "C:", "server01", "server01")
+		if reflect.DeepEqual(a, b) {
+			t.Error("two entities sharing a display name produced identical label sets, want distinct")
+		}
+
+		c := seriesLabels("ctr-2", "ent-1", "LogicalDisk", "% Free Space", "C:", "server01", "server01")
+		if reflect.DeepEqual(a, c) {
+			t.Error("two rules sharing an object+counter produced identical label sets, want distinct")
 		}
 	})
 }

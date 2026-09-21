@@ -27,13 +27,16 @@ func TestClassQueries(t *testing.T) {
 			},
 		},
 		{
-			name:  "by display name hits dbo.ManagedTypeView.DisplayName",
+			name:  "by display name resolves LocalizedText by preference",
 			query: classesQueryByDisplayName,
 			wantContain: []string{
-				"FROM dbo.ManagedTypeView",
-				"DisplayName LIKE @search",
-				"WHERE Abstract = 0",
-				"LanguageCode = 'ENU'",
+				"FROM dbo.ManagedType mt",
+				// The ContentReadable filter dbo.ManagedTypeView used to
+				// supply has to be carried over by hand now.
+				"AND mp.ContentReadable = 1",
+				"WHERE mt.IsAbstract = 0",
+				"WHERE lt.LTStringId = mt.ManagedTypeId AND lt.LTStringType = 1",
+				"ISNULL(disp.LTValue, mt.TypeName) LIKE @search",
 				fmt.Sprintf("TOP %d", defaultSearchLimit),
 			},
 		},
@@ -48,6 +51,14 @@ func TestClassQueries(t *testing.T) {
 			}
 			if strings.Contains(c.query, "%!") {
 				t.Errorf("query has a leftover Sprintf verb, want none\nfull query:\n%s", c.query)
+			}
+			// Pinning one LanguageCode is what used to hide classes localized
+			// into any other language (this deployment runs ENU and ENA), and
+			// classes with no display string at all, whose LanguageCode is
+			// NULL and so matches nothing. Language is a preference now — see
+			// localizedNameApply.
+			if strings.Contains(c.query, "LanguageCode = '") {
+				t.Errorf("query filters on a single LanguageCode, want a preference order\nfull query:\n%s", c.query)
 			}
 		})
 	}

@@ -158,6 +158,48 @@ func seriesLabel(legendFormat, objectName, counterName, instanceName, entityName
 	return replacer.Replace(legendFormat)
 }
 
+// seriesLabels builds the dimensional labels carried on a performance series'
+// value field. seriesLabel flattens these same facts into one rendered string
+// for the legend, which is display only — nothing downstream can take it
+// apart again. Labels are what Grafana's dimensional transformations read
+// ("Labels to fields", "Prepare time series", "Partition by values"), so
+// without them a dashboard has no way to filter or group by instance/entity:
+// the instance name only exists as a substring of a sentence. Names are kept
+// in sync with the legendFormat macros ({{object}} etc., see seriesLabel) so
+// a user who knows one knows the other.
+//
+// counterID/entityID are the raw ids making up QueryPerformance's series key,
+// and they are labels rather than an implementation detail on purpose: the
+// display names alone are not unique. ManagedEntityDefaultName is a computed
+// alias of dbo.ManagedEntity.DisplayName with no uniqueness constraint (two
+// re-imaged or cloned agents routinely share one), and two rules from
+// different management packs can carry the same ObjectName+CounterName, so
+// (object, counter, instance, entity, host) can repeat across two genuinely
+// distinct series. Grafana's timeseries-multi contract requires each frame's
+// label set to identify it uniquely — duplicates get collapsed or collide
+// once a transformation groups on them. Including the series key itself makes
+// that uniqueness true by construction rather than by luck.
+//
+// instance is always present, empty string and all, even though seriesLabel
+// drops an empty instance from the rendered legend: a response mixing
+// instanced and non-instanced counters (a multi-counter counterIDs selection)
+// would otherwise hand Grafana frames with different label *keys*, which
+// makes "Labels to fields" produce ragged columns.
+func seriesLabels(counterID, entityID, objectName, counterName, instanceName, entityName, hostName string) data.Labels {
+	if hostName == "" {
+		hostName = entityName
+	}
+	return data.Labels{
+		"object":    objectName,
+		"counter":   counterName,
+		"instance":  instanceName,
+		"entity":    entityName,
+		"host":      hostName,
+		"counterId": counterID,
+		"entityId":  entityID,
+	}
+}
+
 // QueryPerformance returns one time-series frame per (counter, managed
 // entity) pair — counterIDs (from the /counters resource picker) alone don't
 // identify a single class instance, since dbo.PerformanceRuleInstance is
@@ -166,6 +208,13 @@ func seriesLabel(legendFormat, objectName, counterName, instanceName, entityName
 // set of (already hosting-expanded) managed entities; pass nil/empty for
 // "every entity reporting these counters." legendFormat customizes the
 // series label — see seriesLabel; pass "" for the built-in default.
+//
+// Frames follow Grafana's timeseries-multi contract: each carries a time
+// field and a "value" field whose labels hold the series' dimensions (see
+// seriesLabels) and whose DisplayNameFromDS holds the rendered legend.
+// Multi-frame rather than wide because SCOM agents submit on their own
+// cadence — timestamps rarely align across entities, so a shared time column
+// would be mostly nulls, and increasingly so the more entities are in scope.
 func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, object, counterName string, entityIDs []string, agg Aggregation, legendFormat string, from, to time.Time) ([]*data.Frame, error) {
 	if len(counterIDs) == 0 && (object == "" || counterName == "") {
 		return nil, nil
@@ -188,6 +237,7 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 	}
 	type series struct {
 		label  string
+		labels data.Labels
 		times  []time.Time
 		values []float64
 	}
@@ -212,7 +262,8 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 		s, ok := seriesByKey[key]
 		if !ok {
 			label := seriesLabel(legendFormat, objectName, counterName, instanceName.String, entityName, hostName.String)
-			s = &series{label: label}
+			labels := seriesLabels(ruleInstanceID, managedEntityID, objectName, counterName, instanceName.String, entityName, hostName.String)
+			s = &series{label: label, labels: labels}
 			seriesByKey[key] = s
 			order = append(order, key)
 		}
@@ -226,16 +277,30 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 	frames := make([]*data.Frame, 0, len(order))
 	for _, key := range order {
 		s := seriesByKey[key]
-		valueField := data.NewField("value", nil, s.values)
-		// The field name alone ("value") is what Grafana's time series panel
-		// uses for the legend, not the frame name — without this, every
-		// series in a multi-instance query (e.g. Process\Working Set across
-		// every process) shows up as the same indistinguishable "value".
+		// Labels carry the series' dimensions in a form transformations can
+		// still take apart (see seriesLabels); DisplayNameFromDS carries the
+		// rendered legend. Both are needed: the field name alone ("value") is
+		// what Grafana's time series panel uses for the legend, not the frame
+		// name — without DisplayNameFromDS, every series in a multi-instance
+		// query (e.g. Process\Working Set across every process) shows up as
+		// the same indistinguishable "value", and with labels but no display
+		// name it degrades instead to an auto-generated
+		// value{object="...", counter="...", ...} dump.
+		valueField := data.NewField("value", s.labels, s.values)
 		valueField.Config = &data.FieldConfig{DisplayNameFromDS: s.label}
 		frame := data.NewFrame(s.label,
 			data.NewField("time", nil, s.times),
 			valueField,
 		)
+		// Declaring the dataplane contract rather than leaving Grafana to
+		// sniff the shape. These frames satisfy it: one time field and one
+		// numeric field each, times ascending per series (the query's ORDER
+		// BY ... p.DateTime guarantees it), and label sets made unique by
+		// including the series key — see seriesLabels.
+		frame.Meta = &data.FrameMeta{
+			Type:        data.FrameTypeTimeSeriesMulti,
+			TypeVersion: data.FrameTypeVersion{0, 1},
+		}
 		frames = append(frames, frame)
 	}
 	return frames, nil

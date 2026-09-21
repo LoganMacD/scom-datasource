@@ -23,7 +23,12 @@ func TestBuildHealthCurrentQuery(t *testing.T) {
 		"AND s.MonitorId = dbo.fn_ManagedTypeId_SystemHealthEntityState()",
 		// Health state display name, with the documented MonitorOperationalState
 		// join and fallback CASE, not a raw HealthState int.
-		"LEFT JOIN dbo.MonitorOperationalState mos ON mos.MonitorId = s.MonitorId AND mos.HealthState = s.HealthState",
+		// (MonitorId, HealthState) is not unique in
+		// dbo.MonitorOperationalState, so the LEFT JOIN this replaced could
+		// fan out and list an entity more than once — see
+		// monitorOperationalStateApply.
+		"SELECT TOP 1 mosi.MonitorOperationalStateName",
+		"WHERE mosi.MonitorId = s.MonitorId AND mosi.HealthState = s.HealthState",
 		"ISNULL(mos.MonitorOperationalStateName, CASE s.HealthState",
 		// InMaintenanceMode comes from dbo.MaintenanceMode, not a nonexistent
 		// column on dbo.State.

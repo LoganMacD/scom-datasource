@@ -72,6 +72,70 @@ func searchLikePattern(search string) string {
 	return b.String()
 }
 
+// localizedTextDisplayName is dbo.LocalizedText.LTStringType's value for an
+// element's display name (2 is its description).
+const localizedTextDisplayName = 1
+
+// localizedNamePreference orders dbo.LocalizedText rows by which language
+// this deployment would rather read a name in. ENU first because every
+// sealed Microsoft management pack ships it and it's the one language
+// guaranteed to name a monitor consistently; ENA next, which supplies the
+// names ENU is missing; then anything else, so an MP localized into neither
+// still gets a name rather than vanishing. LanguageCode breaks ties in that
+// last bucket so the choice is deterministic rather than whatever order the
+// engine happens to return.
+const localizedNamePreference = `CASE lt.LanguageCode WHEN 'ENU' THEN 0 WHEN 'ENA' THEN 1 ELSE 2 END, lt.LanguageCode`
+
+// localizedNameApply builds an OUTER APPLY that resolves one element's
+// display name out of dbo.LocalizedText, aliased so the caller can select
+// "<alias>.LTValue".
+//
+// This exists because SCOM's own *View wrappers (dbo.MonitorView,
+// dbo.ManagedTypeView) LEFT JOIN LocalizedText with no language restriction
+// at all, so they emit one row per installed language pack — every query
+// through them has to collapse that somehow. Filtering to a single
+// LanguageCode is the obvious way and the wrong one: it silently drops any
+// element localized into some *other* language, and drops elements with no
+// display string whatsoever, since their LanguageCode is NULL and NULL never
+// equals anything. On a deployment running more than one English pack that's
+// not hypothetical — an in-house MP authored under en-AU carries ENA strings
+// and no ENU ones, and disappears entirely.
+//
+// TOP 1 collapses the duplication structurally instead, so language choice
+// only decides which name is shown, never whether a row survives. Callers
+// pair it with ISNULL(<alias>.LTValue, <the element's internal name>) to
+// cover the no-display-string case, which is what the SCOM console shows
+// there too.
+func localizedNameApply(idColumn, alias string) string {
+	return fmt.Sprintf(`
+OUTER APPLY (
+	SELECT TOP 1 lt.LTValue
+	FROM dbo.LocalizedText lt
+	WHERE lt.LTStringId = %s AND lt.LTStringType = %d
+	ORDER BY %s
+) %s`, idColumn, localizedTextDisplayName, localizedNamePreference, alias)
+}
+
+// monitorOperationalStateApply resolves a monitor's operator-facing state
+// name for one health state, aliased "mos" so healthStateCase can read
+// mos.MonitorOperationalStateName off it.
+//
+// An OUTER APPLY ... TOP 1 rather than the plain LEFT JOIN this replaced:
+// nothing makes (MonitorId, HealthState) unique in
+// dbo.MonitorOperationalState — a monitor may map several named operational
+// states onto one health state — so a join on that pair fans out and
+// multiplies whatever row it's attached to. Microsoft's own dbo.StateView
+// joins it exactly that way and papers over the result with SELECT DISTINCT.
+func monitorOperationalStateApply(monitorIDColumn, healthStateColumn string) string {
+	return fmt.Sprintf(`
+OUTER APPLY (
+	SELECT TOP 1 mosi.MonitorOperationalStateName
+	FROM dbo.MonitorOperationalState mosi
+	WHERE mosi.MonitorId = %s AND mosi.HealthState = %s
+	ORDER BY mosi.MonitorOperationalStateName
+) mos`, monitorIDColumn, healthStateColumn)
+}
+
 // idScopeParamName is the fixed name of the single string parameter
 // idScopeTempTable binds, regardless of how many ids are in the list.
 const idScopeParamName = "idScopeValues"

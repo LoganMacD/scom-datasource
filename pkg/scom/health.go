@@ -15,6 +15,9 @@ import (
 // comment on Microsoft's own dbo.StateView — a monitor isn't guaranteed to
 // have rows there, so this falls back to the well-known 0-3 health state
 // codes (Not Monitored/Healthy/Warning/Critical) when it's missing.
+//
+// Reads off the "mos" alias that monitorOperationalStateApply supplies; that
+// pairing is the whole contract, so the two are always used together.
 func healthStateCase(monitorOSAlias, healthStateCol string) string {
 	return fmt.Sprintf(`ISNULL(%s.MonitorOperationalStateName, CASE %s
 		WHEN 0 THEN 'Not Monitored'
@@ -46,12 +49,14 @@ SELECT
 	s.LastModified,
 	ISNULL(mm.IsInMaintenanceMode, 0) AS InMaintenanceMode
 FROM dbo.State s
-INNER JOIN dbo.BaseManagedEntity bme ON s.BaseManagedEntityId = bme.BaseManagedEntityId
-LEFT JOIN dbo.MonitorOperationalState mos ON mos.MonitorId = s.MonitorId AND mos.HealthState = s.HealthState
+INNER JOIN dbo.BaseManagedEntity bme ON s.BaseManagedEntityId = bme.BaseManagedEntityId%s
 LEFT JOIN dbo.MaintenanceMode mm ON mm.BaseManagedEntityId = bme.BaseManagedEntityId
 WHERE s.BaseManagedEntityId IN (SELECT Id FROM %s)
 	AND s.MonitorId = dbo.fn_ManagedTypeId_SystemHealthEntityState()
-ORDER BY bme.DisplayName`, healthStateCase("mos", "s.HealthState"), healthScopeTempTable)
+ORDER BY bme.DisplayName`,
+		healthStateCase("mos", "s.HealthState"),
+		monitorOperationalStateApply("s.MonitorId", "s.HealthState"),
+		healthScopeTempTable)
 	return query, args
 }
 
