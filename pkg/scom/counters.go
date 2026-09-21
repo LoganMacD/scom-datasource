@@ -121,44 +121,6 @@ ORDER BY pri.InstanceName`, defaultSearchLimit, scopeClause)
 	return runOptionsQuery(ctx, db, query, args)
 }
 
-// ResolveCounterInstanceIDs returns every PerformanceRuleInstanceRowId for
-// the given object/counter name, scoped to instanceIDs (already
-// hosting-expanded) if given, with no TOP cap and no free-text filter —
-// unlike SearchCounterInstances, which is deliberately capped for the picker
-// UI. It backs query execution for the case where an object/counter are
-// chosen but no specific instances were narrowed down in the picker: "no
-// instances narrowed" then means "every instance reporting this counter,"
-// mirroring ResolveInstanceIDs's "no instances chosen" semantics.
-func ResolveCounterInstanceIDs(ctx context.Context, db *sql.DB, instanceIDs []string, object, counterName string) ([]string, error) {
-	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
-	args := append([]any{
-		sql.Named("object", object),
-		sql.Named("counterName", counterName),
-	}, scopeArgs...)
-
-	query := setupSQL + fmt.Sprintf(`
-SELECT CONVERT(varchar(20), pri.PerformanceRuleInstanceRowId)
-FROM dbo.vPerformanceRuleInstance pri
-INNER JOIN dbo.vPerformanceRule pr ON pri.RuleRowId = pr.RuleRowId
-WHERE pr.ObjectName = @object AND pr.CounterName = @counterName%s`, scopeClause)
-
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
 func runOptionsQuery(ctx context.Context, db *sql.DB, query string, args []any) ([]Option, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {

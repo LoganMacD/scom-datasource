@@ -41,7 +41,7 @@ func TestBuildPerformanceQuery(t *testing.T) {
 	to := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 
 	t.Run("hourly aggregation selects AverageValue from vPerfHourly", func(t *testing.T) {
-		query, args, err := buildPerformanceQuery([]string{"ctr-1"}, nil, AggregationHourly, from, to)
+		query, args, err := buildPerformanceQuery([]string{"ctr-1"}, "", "", nil, AggregationHourly, from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -78,7 +78,7 @@ func TestBuildPerformanceQuery(t *testing.T) {
 	})
 
 	t.Run("raw aggregation selects SampleValue from vPerfRaw", func(t *testing.T) {
-		query, _, err := buildPerformanceQuery([]string{"ctr-1"}, nil, AggregationRaw, from, to)
+		query, _, err := buildPerformanceQuery([]string{"ctr-1"}, "", "", nil, AggregationRaw, from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -88,7 +88,7 @@ func TestBuildPerformanceQuery(t *testing.T) {
 	})
 
 	t.Run("entityIDs scopes results via a temp table join, not a literal IN list", func(t *testing.T) {
-		query, args, err := buildPerformanceQuery([]string{"ctr-1"}, []string{"ent-1", "ent-2"}, AggregationHourly, from, to)
+		query, args, err := buildPerformanceQuery([]string{"ctr-1"}, "", "", []string{"ent-1", "ent-2"}, AggregationHourly, from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -108,8 +108,24 @@ func TestBuildPerformanceQuery(t *testing.T) {
 		}
 	})
 
+	t.Run("no counter ids matches by object and counter name, with no IN list", func(t *testing.T) {
+		query, args, err := buildPerformanceQuery(nil, "Processor", "% Processor Time", nil, AggregationHourly, from, to)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(query, "WHERE pr.ObjectName = @object AND pr.CounterName = @counterName") {
+			t.Errorf("query missing object/counter name filter: %s", query)
+		}
+		if strings.Contains(query, "PerformanceRuleInstanceRowId IN") {
+			t.Errorf("query should not use a counter id IN list: %s", query)
+		}
+		if len(args) != 4 { // from, to, object, counterName
+			t.Fatalf("got %d args, want 4", len(args))
+		}
+	})
+
 	t.Run("invalid aggregation errors instead of building a bad query", func(t *testing.T) {
-		_, _, err := buildPerformanceQuery([]string{"ctr-1"}, nil, "weekly", from, to)
+		_, _, err := buildPerformanceQuery([]string{"ctr-1"}, "", "", nil, "weekly", from, to)
 		if err == nil {
 			t.Fatal("got no error for an unsupported aggregation, want one")
 		}

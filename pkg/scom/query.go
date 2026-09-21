@@ -183,15 +183,14 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time, datasou
 		}
 		// No specific counter instances narrowed down in the picker: an
 		// object/counter selection alone means "every instance reporting
-		// this counter" within that scope.
+		// this counter" within that scope. QueryPerformance matches it by
+		// name directly instead of resolving it to a (potentially huge) list
+		// of rule instance ids first.
+		var object, counterName string
 		if len(counterIDs) == 0 && qm.Object != nil && qm.CounterName != nil {
-			resolved, err := ResolveCounterInstanceIDs(ctx, db.Warehouse, scopedIDs, qm.Object.Value, qm.CounterName.Value)
-			if err != nil {
-				return nil, fmt.Errorf("resolve counter instances: %w", err)
-			}
-			counterIDs = resolved
+			object, counterName = qm.Object.Value, qm.CounterName.Value
 		}
-		return QueryPerformance(ctx, db.Warehouse, counterIDs, scopedIDs, qm.Aggregation, qm.LegendFormat, from, to)
+		return QueryPerformance(ctx, db.Warehouse, counterIDs, object, counterName, scopedIDs, qm.Aggregation, qm.LegendFormat, from, to)
 
 	case QueryTypeAlerts:
 		// Alerts are almost always raised against the object that actually

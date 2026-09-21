@@ -61,17 +61,33 @@ const performanceEntityScopeTempTable = "#EntityScope"
 // nil/empty for "every entity") is required to scope results to the
 // instances actually selected, and the caller must also split output series
 // per entity, not just per counter — see QueryPerformance below.
-func buildPerformanceQuery(counterIDs []string, entityIDs []string, agg Aggregation, from, to time.Time) (string, []any, error) {
+//
+// When counterIDs is empty, the counter is selected by object/counterName
+// instead — "every instance reporting this counter." That is joined by name
+// against dbo.vPerformanceRule (already in the query) rather than first
+// resolving thousands of PerformanceRuleInstanceRowIds into a literal IN
+// list, which is what used to blow the optimizer's resource limit (and the
+// ~2,100 RPC parameter cap) on broad selections.
+func buildPerformanceQuery(counterIDs []string, object, counterName string, entityIDs []string, agg Aggregation, from, to time.Time) (string, []any, error) {
 	table, valueColumn, err := aggregationTable(agg)
 	if err != nil {
 		return "", nil, err
 	}
 
-	inSQL, inArgs := inClause("ctr", counterIDs)
-	args := append([]any{
+	args := []any{
 		sql.Named("from", from),
 		sql.Named("to", to),
-	}, inArgs...)
+	}
+
+	var counterFilter string
+	if len(counterIDs) > 0 {
+		inSQL, inArgs := inClause("ctr", counterIDs)
+		counterFilter = "p.PerformanceRuleInstanceRowId IN " + inSQL
+		args = append(args, inArgs...)
+	} else {
+		counterFilter = "pr.ObjectName = @object AND pr.CounterName = @counterName"
+		args = append(args, sql.Named("object", object), sql.Named("counterName", counterName))
+	}
 
 	setupSQL := ""
 	entityFilter := ""
@@ -98,9 +114,9 @@ INNER JOIN dbo.vPerformanceRuleInstance pri ON p.PerformanceRuleInstanceRowId = 
 INNER JOIN dbo.vPerformanceRule pr ON pri.RuleRowId = pr.RuleRowId
 INNER JOIN dbo.vManagedEntity me ON p.ManagedEntityRowId = me.ManagedEntityRowId
 LEFT JOIN dbo.vManagedEntity tme ON tme.ManagedEntityRowId = COALESCE(me.TopLevelHostManagedEntityRowId, me.ManagedEntityRowId)
-WHERE p.PerformanceRuleInstanceRowId IN %s
+WHERE %s
 	AND p.DateTime >= @from AND p.DateTime <= @to%s
-ORDER BY p.PerformanceRuleInstanceRowId, me.ManagedEntityGuid, p.DateTime`, valueColumn, table, inSQL, entityFilter)
+ORDER BY p.PerformanceRuleInstanceRowId, me.ManagedEntityGuid, p.DateTime`, valueColumn, table, counterFilter, entityFilter)
 
 	return query, args, nil
 }
@@ -150,12 +166,12 @@ func seriesLabel(legendFormat, objectName, counterName, instanceName, entityName
 // set of (already hosting-expanded) managed entities; pass nil/empty for
 // "every entity reporting these counters." legendFormat customizes the
 // series label — see seriesLabel; pass "" for the built-in default.
-func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, entityIDs []string, agg Aggregation, legendFormat string, from, to time.Time) ([]*data.Frame, error) {
-	if len(counterIDs) == 0 {
+func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, object, counterName string, entityIDs []string, agg Aggregation, legendFormat string, from, to time.Time) ([]*data.Frame, error) {
+	if len(counterIDs) == 0 && (object == "" || counterName == "") {
 		return nil, nil
 	}
 
-	query, args, err := buildPerformanceQuery(counterIDs, entityIDs, agg, from, to)
+	query, args, err := buildPerformanceQuery(counterIDs, object, counterName, entityIDs, agg, from, to)
 	if err != nil {
 		return nil, err
 	}
