@@ -201,6 +201,9 @@ func (d *Datasource) resolveCounterScopeIDs(ctx context.Context, q url.Values) (
 	if len(instanceIDs) == 0 {
 		return nil, nil
 	}
+	// A whole class/group, or a large explicit selection, is compared via its
+	// first few instances only — see scom.CounterPickerSampleSize.
+	instanceIDs = scom.SampleCounterScopeIDs(instanceIDs)
 	return scom.ExpandHostedEntityIDs(ctx, d.db.Operational, instanceIDs)
 }
 

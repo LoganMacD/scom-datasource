@@ -13,6 +13,23 @@ import (
 // risk across concurrent requests.
 const counterScopeTempTable = "#CounterScope"
 
+// CounterPickerSampleSize is how many top-level instances the counter pickers
+// look at when the selection is broad (a whole class/group, or more than this
+// many explicit instances). Instances of one class report near-identical
+// counters, so a small sample surfaces the same picker options at a fraction
+// of the hosting-expansion and Perf.vPerfHourly scan cost.
+const CounterPickerSampleSize = 10
+
+// SampleCounterScopeIDs caps ids to the first CounterPickerSampleSize entries.
+// It applies to the picker resource endpoints only; query execution still
+// covers every selected instance.
+func SampleCounterScopeIDs(ids []string) []string {
+	if len(ids) > CounterPickerSampleSize {
+		return ids[:CounterPickerSampleSize]
+	}
+	return ids
+}
+
 // counterScopeClause builds a setup batch plus an "AND EXISTS (...)"
 // fragment that restricts a pri-aliased dbo.vPerformanceRuleInstance row to
 // counters that actually have collected data for one of the given (already

@@ -8,6 +8,19 @@ import (
 	mssql "github.com/microsoft/go-mssqldb"
 )
 
+func TestSampleCounterScopeIDs(t *testing.T) {
+	ids := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}
+	if got := SampleCounterScopeIDs(ids); len(got) != CounterPickerSampleSize || got[9] != "10" {
+		t.Errorf("got %v, want first %d ids", got, CounterPickerSampleSize)
+	}
+	if got := SampleCounterScopeIDs(ids[:3]); len(got) != 3 {
+		t.Errorf("got %v, want ids unchanged", got)
+	}
+	if got := SampleCounterScopeIDs(nil); len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
+	}
+}
+
 func TestCounterScopeClause(t *testing.T) {
 	t.Run("empty instanceIDs applies no scope", func(t *testing.T) {
 		setupSQL, clause, args := counterScopeClause(nil)
