@@ -201,7 +201,8 @@ func seriesLabels(counterID, entityID, objectName, counterName, instanceName, en
 }
 
 // filterableValueField is a second copy of a series' values, carried purely
-// so "Filter data by values" has something to aim at.
+// so "Filter data by values" has something to aim at. Opt-in per query — see
+// the filterableValue argument to QueryPerformance.
 //
 // The graphed value field can't serve that purpose. Grafana resolves a
 // field's display name once, in calculateFieldDisplayName, and both the graph
@@ -248,7 +249,7 @@ func filterableValueField(values []float64) *data.Field {
 // Multi-frame rather than wide because SCOM agents submit on their own
 // cadence — timestamps rarely align across entities, so a shared time column
 // would be mostly nulls, and increasingly so the more entities are in scope.
-func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, object, counterName string, entityIDs []string, agg Aggregation, legendFormat string, from, to time.Time) ([]*data.Frame, error) {
+func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, object, counterName string, entityIDs []string, agg Aggregation, legendFormat string, filterableValue bool, from, to time.Time) ([]*data.Frame, error) {
 	if len(counterIDs) == 0 && (object == "" || counterName == "") {
 		return nil, nil
 	}
@@ -324,8 +325,13 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 		frame := data.NewFrame(s.label,
 			data.NewField("time", nil, s.times),
 			valueField,
-			filterableValueField(s.values),
 		)
+		// Off by default: it duplicates every sample, and a frame carrying a
+		// second numeric field is a shape some panels may read differently.
+		// Only worth paying for on a panel that actually filters on value.
+		if filterableValue {
+			frame.Fields = append(frame.Fields, filterableValueField(s.values))
+		}
 		// Declaring the dataplane contract rather than leaving Grafana to
 		// sniff the shape. These frames satisfy it: one time field and one
 		// numeric field each, times ascending per series (the query's ORDER

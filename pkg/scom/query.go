@@ -44,7 +44,12 @@ type QueryModel struct {
 	// LegendFormat overrides the default performance series label — see
 	// seriesLabel in performance.go. Empty (including on a query saved before
 	// this field existed) keeps the built-in default.
-	LegendFormat    string      `json:"legendFormat"`
+	LegendFormat string `json:"legendFormat"`
+	// FilterableValue adds a hidden second copy of each performance series'
+	// values, displayed as "value" in every frame so "Filter data by values"
+	// can target it — see filterableValueField in performance.go. False (the
+	// default, and any query saved before this field existed) omits it.
+	FilterableValue bool        `json:"filterableValue"`
 	AllAlerts       bool        `json:"allAlerts"`
 	Severities      []int64     `json:"severityFilter"`
 	ResolutionState []int64     `json:"resolutionStateFilter"`
@@ -199,7 +204,7 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time, datasou
 		if len(counterIDs) == 0 && qm.Object != nil && qm.CounterName != nil {
 			object, counterName = qm.Object.Value, qm.CounterName.Value
 		}
-		return QueryPerformance(ctx, db.Warehouse, counterIDs, object, counterName, scopedIDs, qm.Aggregation, qm.LegendFormat, from, to)
+		return QueryPerformance(ctx, db.Warehouse, counterIDs, object, counterName, scopedIDs, qm.Aggregation, qm.LegendFormat, qm.FilterableValue, from, to)
 
 	case QueryTypeAlerts:
 		// Alerts are almost always raised against the object that actually

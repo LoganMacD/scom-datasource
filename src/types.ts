@@ -94,6 +94,10 @@ export interface MyQuery extends DataQuery {
   // (including on a query saved before this field existed) keeps the
   // built-in default — see seriesLabel in pkg/scom/performance.go.
   legendFormat?: string;
+  // Adds a hidden duplicate of the value column, displayed as "value" in
+  // every series so "Filter data by values" can target it — see
+  // filterableValueField in pkg/scom/performance.go. Off by default.
+  filterableValue?: boolean;
   // Ignores class/group/instances entirely and returns every alert in the
   // time range (still subject to severity/resolution state filters below).
   allAlerts?: boolean;

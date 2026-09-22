@@ -1,6 +1,6 @@
 import React, { ChangeEvent, useCallback } from 'react';
 import { SelectableValue } from '@grafana/data';
-import { Combobox, ComboboxOption, InlineField, Input, MultiCombobox, RadioButtonGroup } from '@grafana/ui';
+import { Combobox, ComboboxOption, InlineField, InlineSwitch, Input, MultiCombobox, RadioButtonGroup } from '@grafana/ui';
 import { DataSource } from '../datasource';
 import { Aggregation, ResourceRef } from '../types';
 
@@ -14,11 +14,13 @@ interface Props {
   value?: ResourceRef[];
   aggregation: Aggregation;
   legendFormat?: string;
+  filterableValue?: boolean;
   onObjectChange: (value?: ResourceRef) => void;
   onCounterNameChange: (value?: ResourceRef) => void;
   onChange: (value: ResourceRef[]) => void;
   onAggregationChange: (aggregation: Aggregation) => void;
   onLegendFormatChange: (legendFormat: string) => void;
+  onFilterableValueChange: (filterableValue: boolean) => void;
   // Legend format only takes effect on blur, not per keystroke — matching
   // how other Grafana query editors avoid re-running the query on every
   // character typed.
@@ -41,11 +43,13 @@ export function CounterPicker({
   value,
   aggregation,
   legendFormat,
+  filterableValue,
   onObjectChange,
   onCounterNameChange,
   onChange,
   onAggregationChange,
   onLegendFormatChange,
+  onFilterableValueChange,
   onRunQuery,
 }: Props) {
   const scopeKey = `${classId ?? ''}|${groupId ?? ''}|${instanceIds.join(',')}`;
@@ -150,6 +154,16 @@ export function CounterPicker({
           placeholder="{{object}} - {{counter}} [{{instance}}] ({{entity}}) on {{host}}"
           onChange={(e: ChangeEvent<HTMLInputElement>) => onLegendFormatChange(e.target.value)}
           onBlur={onRunQuery}
+        />
+      </InlineField>
+      <InlineField
+        label="Filterable value"
+        labelWidth={14}
+        tooltip="Adds a second copy of the value, named 'value' in every series, so the 'Filter data by values' transformation can target it. The normal value column is named after the legend, which differs per series, so a filter can only ever match one of them. The copy is hidden from the graph, legend and tooltip — it shows up in Table view and in the transformation's field list. Leave off unless you need it: it doubles the values sent to the browser."
+      >
+        <InlineSwitch
+          value={!!filterableValue}
+          onChange={(e) => onFilterableValueChange(e.currentTarget.checked)}
         />
       </InlineField>
     </>
