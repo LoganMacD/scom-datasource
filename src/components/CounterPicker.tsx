@@ -2,7 +2,7 @@ import React, { ChangeEvent, useCallback } from 'react';
 import { SelectableValue } from '@grafana/data';
 import { Combobox, ComboboxOption, InlineField, Input, MultiCombobox, RadioButtonGroup } from '@grafana/ui';
 import { DataSource } from '../datasource';
-import { Aggregation, ResourceRef } from '../types';
+import { Aggregation, PerformanceFormat, ResourceRef } from '../types';
 
 interface Props {
   datasource: DataSource;
@@ -14,11 +14,13 @@ interface Props {
   value?: ResourceRef[];
   aggregation: Aggregation;
   legendFormat?: string;
+  performanceFormat: PerformanceFormat;
   onObjectChange: (value?: ResourceRef) => void;
   onCounterNameChange: (value?: ResourceRef) => void;
   onChange: (value: ResourceRef[]) => void;
   onAggregationChange: (aggregation: Aggregation) => void;
   onLegendFormatChange: (legendFormat: string) => void;
+  onPerformanceFormatChange: (performanceFormat: PerformanceFormat) => void;
   // Legend format only takes effect on blur, not per keystroke — matching
   // how other Grafana query editors avoid re-running the query on every
   // character typed.
@@ -31,6 +33,11 @@ const AGGREGATION_OPTIONS: Array<SelectableValue<Aggregation>> = [
   { label: 'Daily', value: 'daily' },
 ];
 
+const FORMAT_OPTIONS: Array<SelectableValue<PerformanceFormat>> = [
+  { label: 'Time series', value: 'timeseries' },
+  { label: 'Table', value: 'table' },
+];
+
 export function CounterPicker({
   datasource,
   classId,
@@ -41,11 +48,13 @@ export function CounterPicker({
   value,
   aggregation,
   legendFormat,
+  performanceFormat,
   onObjectChange,
   onCounterNameChange,
   onChange,
   onAggregationChange,
   onLegendFormatChange,
+  onPerformanceFormatChange,
   onRunQuery,
 }: Props) {
   const scopeKey = `${classId ?? ''}|${groupId ?? ''}|${instanceIds.join(',')}`;
@@ -137,6 +146,17 @@ export function CounterPicker({
           options={AGGREGATION_OPTIONS}
           value={aggregation}
           onChange={(v) => onAggregationChange(v ?? 'hourly')}
+        />
+      </InlineField>
+      <InlineField
+        label="Format"
+        labelWidth={14}
+        tooltip="Time series returns one series per instance for graphing, each carrying object, counter, instance, entity and host as plain columns alongside the value — so you can filter or group by instance with transformations such as Filter data by values without pivoting labels first. Table returns the same dimensions as a single flat frame, one row per sample, for table panels."
+      >
+        <RadioButtonGroup
+          options={FORMAT_OPTIONS}
+          value={performanceFormat}
+          onChange={(v) => onPerformanceFormatChange(v ?? 'timeseries')}
         />
       </InlineField>
       <InlineField

@@ -87,11 +87,13 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
           value={query.counters}
           aggregation={query.aggregation ?? 'hourly'}
           legendFormat={query.legendFormat}
+          performanceFormat={query.performanceFormat ?? 'timeseries'}
           onObjectChange={(object) => update({ object, counterName: undefined, counters: [] })}
           onCounterNameChange={(counterName) => update({ counterName, counters: [] })}
           onChange={(counters) => update({ counters })}
           onAggregationChange={(aggregation) => update({ aggregation })}
           onLegendFormatChange={(legendFormat) => update({ legendFormat })}
+          onPerformanceFormatChange={(performanceFormat) => updateAndRun({ performanceFormat })}
           onRunQuery={onRunQuery}
         />
       )}
