@@ -1,5 +1,23 @@
-# This GitHub Action automates the process of building Grafana plugins.
-# (For more information, see https://github.com/grafana/plugin-actions/blob/main/build-plugin/README.md)
+# Builds, packages and publishes a GitHub release for the plugin.
+#
+# This used to be a single `grafana/plugin-actions/build-plugin` step. That
+# action is pinned, but it delegates to `package-plugin@main` — unpinned —
+# whose final step is an unconditional
+# `npx -y @grafana/plugin-validator@latest -sourceCodeUri file://./ <archive>`,
+# also unpinned, with no input to skip it and no continue-on-error. Two
+# floating references meant a release could start failing with no change on
+# this side, which is exactly what happened: the validator's `org` analyzer
+# looks up the Grafana Cloud account named by the plugin id's prefix ("scom")
+# and fails the run when it doesn't exist.
+#
+# That check gates publication to the Grafana catalog. This plugin isn't
+# published there, so it was failing releases over a rule that doesn't apply.
+# The build below mirrors ci.yml's build job step for step, so the artifact is
+# produced exactly as it always was, minus the catalog validation.
+#
+# If this plugin is ever submitted to the catalog, the id needs an `org`
+# prefix matching a registered Grafana Cloud account — see
+# https://grafana.com/developers/plugin-tools/publish-a-plugin/publish-a-plugin
 name: Release
 
 on:
@@ -14,18 +32,96 @@ jobs:
     permissions:
       contents: write
     runs-on: ubuntu-latest
+    env:
+      GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.2.0
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v6
         with:
-          go-version: '1.26'
-        # Uncomment to enable plugin signing
-        # (For more info on how to generate the access policy token see https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token)
-        #with:
-        # Make sure to save the token in your repository secrets
-        #policy_token: $
-        # Usage of GRAFANA_API_KEY is deprecated, prefer `policy_token` option above
-        #grafana_token: $
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build backend
+        uses: magefile/mage-action@a662bd8c29d8106879588cfff83b2faf6e6f59db # v4.0.0
+        with:
+          version: latest
+          args: buildAll
+
+      # Only signs when the secret is present; an unsigned archive is still a
+      # valid private-distribution build, same as in ci.yml.
+      - name: Sign plugin
+        run: npm run sign
+        if: ${{ env.GRAFANA_ACCESS_POLICY_TOKEN != '' }}
+
+      - name: Get plugin metadata
+        id: metadata
+        run: |
+          export GRAFANA_PLUGIN_ID=$(cat dist/plugin.json | jq -r .id)
+          export GRAFANA_PLUGIN_VERSION=$(cat dist/plugin.json | jq -r .info.version)
+
+          echo "plugin-id=${GRAFANA_PLUGIN_ID}" >> $GITHUB_OUTPUT
+          echo "plugin-version=${GRAFANA_PLUGIN_VERSION}" >> $GITHUB_OUTPUT
+          echo "archive=${GRAFANA_PLUGIN_ID}-${GRAFANA_PLUGIN_VERSION}.zip" >> $GITHUB_OUTPUT
+
+      # The check build-plugin used to perform: the version baked into
+      # plugin.json must match the tag being released, or the artifact would
+      # be published under a version nothing else agrees with.
+      - name: Check package version matches tag
+        run: |
+          if [ "v${PLUGIN_VERSION}" != "${GITHUB_TAG}" ]; then
+            echo "plugin.json version (v${PLUGIN_VERSION}) does not match the release tag (${GITHUB_TAG})" >&2
+            exit 1
+          fi
+        env:
+          PLUGIN_VERSION: ${{ steps.metadata.outputs.plugin-version }}
+          GITHUB_TAG: ${{ github.ref_name }}
+
+      - name: Package plugin
+        run: |
+          mv dist "${PLUGIN_ID}"
+          zip "${ARCHIVE}" "${PLUGIN_ID}" -r
+          sha1sum "${ARCHIVE}" > "${ARCHIVE}.sha1"
+        env:
+          ARCHIVE: ${{ steps.metadata.outputs.archive }}
+          PLUGIN_ID: ${{ steps.metadata.outputs.plugin-id }}
+
+      # Still validates plugin.json itself — the same single analyzer ci.yml
+      # runs. What's deliberately not run here is the full analyzer suite,
+      # whose catalog-publication checks (org, signing, screenshots) don't
+      # apply to a privately distributed plugin.
+      - name: Check plugin.json
+        run: |
+          docker run --pull=always \
+            -v $PWD/${ARCHIVE}:/archive.zip \
+            grafana/plugin-validator-cli -analyzer=metadatavalid /archive.zip
+        env:
+          ARCHIVE: ${{ steps.metadata.outputs.archive }}
+
+      # build-plugin took the release body from the first "## " section of
+      # CHANGELOG.md. That file has not been maintained — its only heading is
+      # "## 1.0.0 (Unreleased)" — so reproducing it would title every release
+      # "Initial release". Generating notes from the commits between tags is
+      # accurate without needing the changelog kept up to date. Switch this
+      # back to `body_path` once CHANGELOG.md is current.
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@62c96d0c4e8a889135c1f3a25910db8dbe0e85f7
+        with:
+          files: |
+            ${{ steps.metadata.outputs.archive }}
+            ${{ steps.metadata.outputs.archive }}.sha1
+          generate_release_notes: true
