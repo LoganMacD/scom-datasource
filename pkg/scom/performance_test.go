@@ -235,149 +235,61 @@ func TestSeriesLabels(t *testing.T) {
 			t.Error("two rules sharing an object+counter produced identical label sets, want distinct")
 		}
 	})
-
-	// The division of labour: the ids make the label set unique, but would
-	// only be noise in a table, so they stay out of the columns.
-	t.Run("ids are labels only, never columns", func(t *testing.T) {
-		for _, d := range performanceDimensions {
-			if d == "counterId" || d == "entityId" {
-				t.Errorf("%q is emitted as a column, want it kept to labels", d)
-			}
-		}
-	})
 }
 
-func testPerformanceSeries() []*performanceSeries {
-	t0 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
-	return []*performanceSeries{
-		{
-			label:  "LogicalDisk - % Free Space [C:] (server01)",
-			labels: seriesLabels("ctr-1", "ent-1", "LogicalDisk", "% Free Space", "C:", "server01", "server01"),
-			times:  []time.Time{t0, t0.Add(time.Hour)},
-			values: []float64{42, 41},
-		},
-		{
-			label:  "LogicalDisk - % Free Space [D:] (server01)",
-			labels: seriesLabels("ctr-2", "ent-1", "LogicalDisk", "% Free Space", "D:", "server01", "server01"),
-			// Deliberately different timestamps from the series above: agents
-			// report on their own cadence.
-			times:  []time.Time{t0.Add(30 * time.Minute)},
-			values: []float64{88},
-		},
-	}
-}
+func TestFilterableValueField(t *testing.T) {
+	values := []float64{42, 41}
+	field := filterableValueField(values)
 
-func TestPerformanceFramesTimeSeries(t *testing.T) {
-	// The zero value is the default, so a query saved before the format
-	// option existed keeps returning one frame per series.
-	for _, format := range []PerformanceFormat{"", PerformanceFormatTimeSeries} {
-		frames := performanceFrames(testPerformanceSeries(), format)
-		if len(frames) != 2 {
-			t.Fatalf("format %q: got %d frames, want one per series (2)", format, len(frames))
+	// "Filter data by values" resolves its target by display name, so this
+	// has to read the same in every frame — hence Config.DisplayName, which
+	// calculateFieldDisplayName returns before it would prefix the frame's
+	// name (the series' legend) onto it.
+	t.Run("display name is stable across frames", func(t *testing.T) {
+		if field.Config == nil || field.Config.DisplayName != "value" {
+			t.Fatalf("got Config %+v, want DisplayName \"value\"", field.Config)
 		}
-		if frames[0].Meta == nil || frames[0].Meta.Type != data.FrameTypeTimeSeriesMulti {
-			t.Errorf("format %q: frame meta = %+v, want timeseries-multi", format, frames[0].Meta)
+	})
+
+	// A second numeric field would otherwise draw an identical second line
+	// per series and double the legend.
+	t.Run("hidden from the graph", func(t *testing.T) {
+		hideFrom, ok := field.Config.Custom["hideFrom"].(map[string]any)
+		if !ok {
+			t.Fatalf("got Custom %+v, want a hideFrom entry", field.Config.Custom)
 		}
-	}
-
-	frames := performanceFrames(testPerformanceSeries(), PerformanceFormatTimeSeries)
-
-	// Anything reading the shape positionally must still see the [time,
-	// value] pair a plain timeseries-multi frame leads with — the dimension
-	// columns go after, never between.
-	t.Run("time and value stay the first two fields", func(t *testing.T) {
-		want := []string{"time", "value", "object", "counter", "instance", "entity", "host"}
-		for _, f := range frames {
-			if len(f.Fields) != len(want) {
-				t.Fatalf("got %d fields, want %d", len(f.Fields), len(want))
-			}
-			for i, name := range want {
-				if f.Fields[i].Name != name {
-					t.Errorf("field[%d] = %q, want %q", i, f.Fields[i].Name, name)
-				}
+		for _, k := range []string{"viz", "legend", "tooltip"} {
+			if hideFrom[k] != true {
+				t.Errorf("hideFrom[%q] = %v, want true", k, hideFrom[k])
 			}
 		}
 	})
 
-	t.Run("dimension columns repeat the series' own values down its length", func(t *testing.T) {
-		instance, _ := frames[0].FieldByName("instance")
-		if instance.Len() != 2 {
-			t.Fatalf("got %d rows, want 2 to match the series' samples", instance.Len())
+	t.Run("carries the same values", func(t *testing.T) {
+		if field.Len() != len(values) {
+			t.Fatalf("got %d values, want %d", field.Len(), len(values))
 		}
-		for i := 0; i < instance.Len(); i++ {
-			if got := instance.At(i); got != "C:" {
-				t.Errorf("instance[%d] = %v, want C:", i, got)
-			}
-		}
-		if second, _ := frames[1].FieldByName("instance"); second.At(0) != "D:" {
-			t.Errorf("second frame instance = %v, want D:", second.At(0))
-		}
-	})
-
-	// The columns are additional to the labels, not a replacement, so an
-	// existing ${__field.labels.x} override keeps working — and the legend
-	// still comes from DisplayNameFromDS rather than an auto-generated dump.
-	t.Run("labels and the rendered legend both survive", func(t *testing.T) {
-		value, _ := frames[0].FieldByName("value")
-		if value.Labels["instance"] != "C:" {
-			t.Errorf("value labels = %v, want instance=C: still present", value.Labels)
-		}
-		if value.Config == nil || value.Config.DisplayNameFromDS != "LogicalDisk - % Free Space [C:] (server01)" {
-			t.Errorf("got DisplayNameFromDS %+v, want the rendered legend", value.Config)
-		}
-	})
-}
-
-func TestPerformanceFramesTable(t *testing.T) {
-	frames := performanceFrames(testPerformanceSeries(), PerformanceFormatTable)
-	if len(frames) != 1 {
-		t.Fatalf("got %d frames, want a single long frame", len(frames))
-	}
-	f := frames[0]
-
-	t.Run("one row per sample across every series", func(t *testing.T) {
-		if f.Rows() != 3 {
-			t.Fatalf("got %d rows, want 3 (2 + 1 samples)", f.Rows())
-		}
-	})
-
-	t.Run("dimensions are plain string columns, time and value survive", func(t *testing.T) {
-		want := []string{"time", "object", "counter", "instance", "entity", "host", "value"}
-		if len(f.Fields) != len(want) {
-			t.Fatalf("got %d fields, want %d", len(f.Fields), len(want))
-		}
-		for i, name := range want {
-			if f.Fields[i].Name != name {
-				t.Errorf("field[%d] = %q, want %q", i, f.Fields[i].Name, name)
-			}
-		}
-		for _, name := range performanceDimensions {
-			field, _ := f.FieldByName(name)
-			if field.Type() != data.FieldTypeString {
-				t.Errorf("%s is %v, want a string column to filter on", name, field.Type())
+		for i, want := range values {
+			if got := field.At(i); got != want {
+				t.Errorf("value[%d] = %v, want %v", i, got, want)
 			}
 		}
 	})
 
-	t.Run("each row carries its own series' dimensions", func(t *testing.T) {
-		instance, _ := f.FieldByName("instance")
-		value, _ := f.FieldByName("value")
-		wantInstance := []string{"C:", "C:", "D:"}
-		wantValue := []float64{42, 41, 88}
-		for i := range wantInstance {
-			if got := instance.At(i); got != wantInstance[i] {
-				t.Errorf("instance[%d] = %v, want %v", i, got, wantInstance[i])
-			}
-			if got := value.At(i); got != wantValue[i] {
-				t.Errorf("value[%d] = %v, want %v", i, got, wantValue[i])
-			}
+	// Copied rather than aliased, so a later edit to either slice can't
+	// silently desynchronise the graphed series from the filterable one.
+	t.Run("does not alias the original slice", func(t *testing.T) {
+		values[0] = 99
+		if field.At(0) == 99.0 {
+			t.Error("copy shares backing array with the original values")
 		}
 	})
 
-	t.Run("no series still yields a valid empty frame", func(t *testing.T) {
-		empty := performanceFrames(nil, PerformanceFormatTable)
-		if len(empty) != 1 || empty[0].Rows() != 0 {
-			t.Errorf("got %d frames, want one empty frame", len(empty))
+	// No labels: labels are what make a field a distinct series, and this one
+	// is deliberately not a series of its own.
+	t.Run("carries no labels", func(t *testing.T) {
+		if len(field.Labels) != 0 {
+			t.Errorf("got labels %v, want none", field.Labels)
 		}
 	})
 }

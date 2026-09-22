@@ -180,17 +180,6 @@ func seriesLabel(legendFormat, objectName, counterName, instanceName, entityName
 // once a transformation groups on them. Including the series key itself makes
 // that uniqueness true by construction rather than by luck.
 //
-// They are deliberately *not* among the columns performanceDimensionFields
-// emits, which is the whole division of labour here: labels are identity, and
-// have to be unique even when that costs readability; columns are what a
-// person filters and groups on, and two guid columns in a table are noise.
-// That split also keeps the one real cost of carrying them contained —
-// pivoting labels into columns ("Labels to fields", "Prepare time series →
-// Long") turns each unique-per-series guid into a column of its own and
-// leaves the follow-up merge nothing to join on. Since the dimensions already
-// arrive as columns, that pivot isn't something a dashboard needs to reach
-// for any more.
-//
 // instance is always present, empty string and all, even though seriesLabel
 // drops an empty instance from the rendered legend: a response mixing
 // instanced and non-instanced counters (a multi-counter counterIDs selection)
@@ -211,162 +200,55 @@ func seriesLabels(counterID, entityID, objectName, counterName, instanceName, en
 	}
 }
 
-// PerformanceFormat selects the shape QueryPerformance returns.
-type PerformanceFormat string
-
-const (
-	// PerformanceFormatTimeSeries (also the zero value, so a query saved
-	// before this field existed keeps its shape) returns one frame per
-	// series — what the time series panel wants.
-	PerformanceFormatTimeSeries PerformanceFormat = "timeseries"
-	// PerformanceFormatTable returns a single long frame with one row per
-	// sample and the series' dimensions as plain string columns, so a
-	// dashboard can filter or group on instance/entity/host with ordinary
-	// transformations (Filter data by values, Group by, ...) instead of
-	// having to pivot labels out of a value field first.
-	PerformanceFormatTable PerformanceFormat = "table"
-)
-
-// performanceSeries is one (counter, managed entity) series' samples.
-type performanceSeries struct {
-	label  string
-	labels data.Labels
-	times  []time.Time
-	values []float64
+// filterableValueField is a second copy of a series' values, carried purely
+// so "Filter data by values" has something to aim at.
+//
+// The graphed value field can't serve that purpose. Grafana resolves a
+// field's display name once, in calculateFieldDisplayName, and both the graph
+// legend and the transformation read that same result — the transformation
+// looks its target field up by display name (see groupFieldIndexByName in
+// filterByValue). Since the legend has to differ per series to be any use,
+// and a filter needs one name that means the same thing in every frame, one
+// field cannot satisfy both. This copy takes the stable name and leaves the
+// original to the legend.
+//
+// Config.DisplayName rather than the field name, because DisplayName is what
+// calculateFieldDisplayName returns first — ahead of the branch that would
+// otherwise prefix this frame's name (its series' legend) onto it and make
+// the column differ per frame all over again.
+//
+// hideFrom keeps the copy out of the graph. Without it a second numeric field
+// draws a second, identical line per series and doubles the legend. It is the
+// time series panel's own custom config (HideSeriesConfig in
+// @grafana/schema), so panels that don't know it — a table, for instance —
+// show the column, which is where you'd want to see it anyway.
+func filterableValueField(values []float64) *data.Field {
+	field := data.NewField("valueCopy", nil, append([]float64(nil), values...))
+	field.Config = &data.FieldConfig{
+		DisplayName: "value",
+		Custom: map[string]any{
+			"hideFrom": map[string]any{"viz": true, "legend": true, "tooltip": true},
+		},
+	}
+	return field
 }
 
-// performanceDimensions is the order the dimension columns are emitted in,
-// by both result formats. These are seriesLabels' operator-facing keys, under
-// the same names, so a query reads the same whichever format it's in — but
-// deliberately not its counterId/entityId, which exist to make a label set
-// unique and would only be noise in a table. See seriesLabels.
-var performanceDimensions = []string{"object", "counter", "instance", "entity", "host"}
-
-// performanceDimensionFields repeats one series' dimensions down its own
-// length, as plain string columns.
-func performanceDimensionFields(s *performanceSeries) []*data.Field {
-	fields := make([]*data.Field, 0, len(performanceDimensions))
-	for _, d := range performanceDimensions {
-		column := make([]string, len(s.times))
-		for i := range column {
-			column[i] = s.labels[d]
-		}
-		fields = append(fields, data.NewField(d, nil, column))
-	}
-	return fields
-}
-
-// performanceFrames shapes series into frames. Split out from
-// QueryPerformance so both formats are directly testable without a live DB —
-// see performance_test.go.
-func performanceFrames(series []*performanceSeries, format PerformanceFormat) []*data.Frame {
-	if format == PerformanceFormatTable {
-		return []*data.Frame{performanceTableFrame(series)}
-	}
-
-	frames := make([]*data.Frame, 0, len(series))
-	for _, s := range series {
-		// Labels carry the series' dimensions in a form transformations can
-		// still take apart (see seriesLabels); DisplayNameFromDS carries the
-		// rendered legend. Both are needed: the field name alone ("value") is
-		// what Grafana's time series panel uses for the legend, not the frame
-		// name — without DisplayNameFromDS, every series in a multi-instance
-		// query (e.g. Process\Working Set across every process) shows up as
-		// the same indistinguishable "value", and with labels but no display
-		// name it degrades instead to an auto-generated
-		// value{object="...", counter="...", ...} dump.
-		valueField := data.NewField("value", s.labels, s.values)
-		valueField.Config = &data.FieldConfig{DisplayNameFromDS: s.label}
-		frame := data.NewFrame(s.label,
-			data.NewField("time", nil, s.times),
-			valueField,
-		)
-		// The dimensions again, as plain string columns, so a panel can
-		// filter or group on instance/entity/host directly instead of first
-		// pivoting them out of the labels above. Appended after time/value
-		// rather than between them, so the first two fields stay exactly the
-		// [time, value] pair a plain timeseries-multi frame has and anything
-		// reading the shape positionally sees no difference. The labels stay
-		// put: these columns are additional to them, not a replacement, so
-		// an existing ${__field.labels.x} override keeps working.
-		//
-		// The dataplane spec says a frame needs "at least time and one
-		// numeric value column, with the first occurrence of each type being
-		// used for the series", which reads as extra string fields being
-		// tolerated and ignored when picking the series. That is a reading of
-		// the spec rather than something verified against a running Grafana —
-		// a consumer that classifies frames by inspecting fields instead of
-		// reading Meta.Type could decide these columns make this long format.
-		frame.Fields = append(frame.Fields, performanceDimensionFields(s)...)
-		// Declaring the dataplane contract rather than leaving Grafana to
-		// sniff the shape: one time field and one numeric field each, times
-		// ascending per series (the query's ORDER BY ... p.DateTime
-		// guarantees it).
-		frame.Meta = &data.FrameMeta{
-			Type:        data.FrameTypeTimeSeriesMulti,
-			TypeVersion: data.FrameTypeVersion{0, 1},
-		}
-		frames = append(frames, frame)
-	}
-	return frames
-}
-
-// performanceTableFrame flattens every series into one long frame: time, one
-// string column per dimension, then value. Rows stay grouped by series, in
-// the order the query returned them, rather than re-sorted by time. No
-// dataplane Type is declared — the rows aren't globally time-ordered, which
-// timeseries-long expects — so Grafana treats it as the plain table it is.
-func performanceTableFrame(series []*performanceSeries) *data.Frame {
-	n := 0
-	for _, s := range series {
-		n += len(s.times)
-	}
-
-	times := make([]time.Time, 0, n)
-	values := make([]float64, 0, n)
-	dims := make(map[string][]string, len(performanceDimensions))
-	for _, d := range performanceDimensions {
-		dims[d] = make([]string, 0, n)
-	}
-
-	for _, s := range series {
-		times = append(times, s.times...)
-		values = append(values, s.values...)
-		for _, d := range performanceDimensions {
-			v := s.labels[d]
-			for range s.times {
-				dims[d] = append(dims[d], v)
-			}
-		}
-	}
-
-	fields := make([]*data.Field, 0, len(performanceDimensions)+2)
-	fields = append(fields, data.NewField("time", nil, times))
-	for _, d := range performanceDimensions {
-		fields = append(fields, data.NewField(d, nil, dims[d]))
-	}
-	fields = append(fields, data.NewField("value", nil, values))
-
-	return data.NewFrame("performance", fields...).SetMeta(&data.FrameMeta{PreferredVisualization: data.VisTypeTable})
-}
-
-// QueryPerformance reads one series per (counter, managed entity) pair —
-// counterIDs (from the /counters resource picker) alone don't identify a
-// single class instance, since dbo.PerformanceRuleInstance is shared across
-// every entity reporting the same rule+instance name; see
+// QueryPerformance returns one time-series frame per (counter, managed
+// entity) pair — counterIDs (from the /counters resource picker) alone don't
+// identify a single class instance, since dbo.PerformanceRuleInstance is
+// shared across every entity reporting the same rule+instance name; see
 // buildPerformanceQuery. entityIDs optionally scopes results to a specific
 // set of (already hosting-expanded) managed entities; pass nil/empty for
 // "every entity reporting these counters." legendFormat customizes the
 // series label — see seriesLabel; pass "" for the built-in default.
 //
-// format picks the result's shape — see performanceFrames. The default is
-// Grafana's timeseries-multi contract: one frame per series, each with a time
+// Frames follow Grafana's timeseries-multi contract: each carries a time
 // field and a "value" field whose labels hold the series' dimensions (see
 // seriesLabels) and whose DisplayNameFromDS holds the rendered legend.
 // Multi-frame rather than wide because SCOM agents submit on their own
 // cadence — timestamps rarely align across entities, so a shared time column
 // would be mostly nulls, and increasingly so the more entities are in scope.
-func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, object, counterName string, entityIDs []string, agg Aggregation, legendFormat string, format PerformanceFormat, from, to time.Time) ([]*data.Frame, error) {
+func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, object, counterName string, entityIDs []string, agg Aggregation, legendFormat string, from, to time.Time) ([]*data.Frame, error) {
 	if len(counterIDs) == 0 && (object == "" || counterName == "") {
 		return nil, nil
 	}
@@ -386,8 +268,14 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 		ruleInstanceID  string
 		managedEntityID string
 	}
-	seriesByKey := map[seriesKey]*performanceSeries{}
-	var order []*performanceSeries
+	type series struct {
+		label  string
+		labels data.Labels
+		times  []time.Time
+		values []float64
+	}
+	seriesByKey := map[seriesKey]*series{}
+	var order []seriesKey
 
 	for rows.Next() {
 		var ruleInstanceID, managedEntityID, objectName, counterName, entityName string
@@ -408,9 +296,9 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 		if !ok {
 			label := seriesLabel(legendFormat, objectName, counterName, instanceName.String, entityName, hostName.String)
 			labels := seriesLabels(ruleInstanceID, managedEntityID, objectName, counterName, instanceName.String, entityName, hostName.String)
-			s = &performanceSeries{label: label, labels: labels}
+			s = &series{label: label, labels: labels}
 			seriesByKey[key] = s
-			order = append(order, s)
+			order = append(order, key)
 		}
 		s.times = append(s.times, ts)
 		s.values = append(s.values, value)
@@ -419,5 +307,35 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 		return nil, err
 	}
 
-	return performanceFrames(order, format), nil
+	frames := make([]*data.Frame, 0, len(order))
+	for _, key := range order {
+		s := seriesByKey[key]
+		// Labels carry the series' dimensions in a form transformations can
+		// still take apart (see seriesLabels); DisplayNameFromDS carries the
+		// rendered legend. Both are needed: the field name alone ("value") is
+		// what Grafana's time series panel uses for the legend, not the frame
+		// name — without DisplayNameFromDS, every series in a multi-instance
+		// query (e.g. Process\Working Set across every process) shows up as
+		// the same indistinguishable "value", and with labels but no display
+		// name it degrades instead to an auto-generated
+		// value{object="...", counter="...", ...} dump.
+		valueField := data.NewField("value", s.labels, s.values)
+		valueField.Config = &data.FieldConfig{DisplayNameFromDS: s.label}
+		frame := data.NewFrame(s.label,
+			data.NewField("time", nil, s.times),
+			valueField,
+			filterableValueField(s.values),
+		)
+		// Declaring the dataplane contract rather than leaving Grafana to
+		// sniff the shape. These frames satisfy it: one time field and one
+		// numeric field each, times ascending per series (the query's ORDER
+		// BY ... p.DateTime guarantees it), and label sets made unique by
+		// including the series key — see seriesLabels.
+		frame.Meta = &data.FrameMeta{
+			Type:        data.FrameTypeTimeSeriesMulti,
+			TypeVersion: data.FrameTypeVersion{0, 1},
+		}
+		frames = append(frames, frame)
+	}
+	return frames, nil
 }

@@ -59,12 +59,6 @@ export type HealthMode = 'current' | 'history' | 'both';
 // see QueryAlertsWarehouse in pkg/scom/alerts.go.
 export type AlertSource = 'operational' | 'warehouse';
 
-// 'timeseries' returns one frame per series (what the time series panel
-// wants); 'table' returns a single long frame with instance/entity/host as
-// plain columns, so they can be filtered with ordinary transformations — see
-// PerformanceFormat in pkg/scom/performance.go.
-export type PerformanceFormat = 'timeseries' | 'table';
-
 export interface ResourceRef {
   value: string;
   label: string;
@@ -100,9 +94,6 @@ export interface MyQuery extends DataQuery {
   // (including on a query saved before this field existed) keeps the
   // built-in default — see seriesLabel in pkg/scom/performance.go.
   legendFormat?: string;
-  // Result shape for a performance query. Unset (a query saved before this
-  // field existed) is 'timeseries'.
-  performanceFormat?: PerformanceFormat;
   // Ignores class/group/instances entirely and returns every alert in the
   // time range (still subject to severity/resolution state filters below).
   allAlerts?: boolean;
