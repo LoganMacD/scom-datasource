@@ -28,6 +28,11 @@ interface Props {
 }
 
 const AGGREGATION_OPTIONS: Array<SelectableValue<Aggregation>> = [
+  {
+    label: 'Auto',
+    value: 'auto',
+    description: 'Picks raw, hourly or daily per time range, from retention and panel width',
+  },
   { label: 'Raw', value: 'raw' },
   { label: 'Hourly', value: 'hourly' },
   { label: 'Daily', value: 'daily' },
@@ -140,7 +145,7 @@ export function CounterPicker({
         <RadioButtonGroup
           options={AGGREGATION_OPTIONS}
           value={aggregation}
-          onChange={(v) => onAggregationChange(v ?? 'hourly')}
+          onChange={(v) => onAggregationChange(v ?? 'auto')}
         />
       </InlineField>
       <InlineField

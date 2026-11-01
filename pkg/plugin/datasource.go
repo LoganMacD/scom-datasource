@@ -69,6 +69,7 @@ func (d *Datasource) query(ctx context.Context, datasourceUID string, query back
 	if err := json.Unmarshal(query.JSON, &qm); err != nil {
 		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
 	}
+	qm.Budget = scom.PointBudget{MaxDataPoints: query.MaxDataPoints, Interval: query.Interval}
 
 	frames, err := scom.Run(ctx, d.db, qm, query.TimeRange.From, query.TimeRange.To, datasourceUID)
 	if err != nil {

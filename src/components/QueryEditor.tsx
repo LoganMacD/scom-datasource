@@ -85,7 +85,9 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
           object={query.object}
           counterName={query.counterName}
           value={query.counters}
-          aggregation={query.aggregation ?? 'hourly'}
+          // Unset runs as raw on the backend, so show it as raw rather than
+          // implying a grain the query isn't using. Not written back to the query.
+          aggregation={query.aggregation ?? 'raw'}
           legendFormat={query.legendFormat}
           filterableValue={query.filterableValue}
           onObjectChange={(object) => update({ object, counterName: undefined, counters: [] })}

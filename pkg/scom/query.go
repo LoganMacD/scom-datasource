@@ -61,6 +61,10 @@ type QueryModel struct {
 	// root — see filterUnhealthyBranches in healthtree.go. Ignored by every
 	// other query type.
 	UnhealthyOnly bool `json:"unhealthyOnly"`
+	// Budget comes from backend.DataQuery's MaxDataPoints/Interval (set in
+	// pkg/plugin/datasource.go), not from the query JSON. Auto aggregation
+	// uses it to pick a grain — see choosePerfGrain.
+	Budget PointBudget `json:"-"`
 }
 
 // AlertSource selects which database an alerts query reads from. The zero
@@ -204,7 +208,7 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time, datasou
 		if len(counterIDs) == 0 && qm.Object != nil && qm.CounterName != nil {
 			object, counterName = qm.Object.Value, qm.CounterName.Value
 		}
-		return QueryPerformance(ctx, db.Warehouse, counterIDs, object, counterName, scopedIDs, qm.Aggregation, qm.LegendFormat, qm.FilterableValue, from, to)
+		return QueryPerformance(ctx, db.Warehouse, counterIDs, object, counterName, scopedIDs, qm.Aggregation, qm.LegendFormat, qm.FilterableValue, from, to, qm.Budget)
 
 	case QueryTypeAlerts:
 		// Alerts are almost always raised against the object that actually

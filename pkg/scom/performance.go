@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 )
 
@@ -249,16 +250,34 @@ func filterableValueField(values []float64) *data.Field {
 // Multi-frame rather than wide because SCOM agents submit on their own
 // cadence — timestamps rarely align across entities, so a shared time column
 // would be mostly nulls, and increasingly so the more entities are in scope.
-func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, object, counterName string, entityIDs []string, agg Aggregation, legendFormat string, filterableValue bool, from, to time.Time) ([]*data.Frame, error) {
+//
+// agg is the saved aggregation; choosePerfGrain resolves it (including Auto)
+// to the one stored grain this query reads, using the warehouse's retention
+// settings and budget. Notices about that choice go on the first frame.
+func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, object, counterName string, entityIDs []string, agg Aggregation, legendFormat string, filterableValue bool, from, to time.Time, budget PointBudget) ([]*data.Frame, error) {
 	if len(counterIDs) == 0 && (object == "" || counterName == "") {
 		return nil, nil
 	}
 
-	query, args, err := buildPerformanceQuery(counterIDs, object, counterName, entityIDs, agg, from, to)
+	logger := log.DefaultLogger.FromContext(ctx)
+	started := time.Now()
+
+	// Retention only informs the choice and its notices. If it can't be read,
+	// explicit grains run unchanged and Auto uses its documented fallback.
+	retention, retentionErr := loadPerfRetention(ctx, db)
+	retentionDuration := time.Since(started)
+	if retentionErr != nil {
+		logger.Warn("SCOM performance: could not read DW retention metadata", "error", retentionErr)
+	}
+	choice := choosePerfGrain(agg, retention, retentionErr, from, to, time.Now().UTC(), budget)
+
+	query, args, err := buildPerformanceQuery(counterIDs, object, counterName, entityIDs, choice.Aggregation, from, to)
 	if err != nil {
 		return nil, err
 	}
+	view, _, _ := aggregationTable(choice.Aggregation)
 
+	queryStarted := time.Now()
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -277,6 +296,8 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 	}
 	seriesByKey := map[seriesKey]*series{}
 	var order []seriesKey
+	var rowCount int
+	var firstTS, lastTS time.Time
 
 	for rows.Next() {
 		var ruleInstanceID, managedEntityID, objectName, counterName, entityName string
@@ -303,10 +324,31 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 		}
 		s.times = append(s.times, ts)
 		s.values = append(s.values, value)
+
+		rowCount++
+		if firstTS.IsZero() || ts.Before(firstTS) {
+			firstTS = ts
+		}
+		if ts.After(lastTS) {
+			lastTS = ts
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+
+	// Ids, credentials and connection details are deliberately left out.
+	r := retention[choice.Aggregation]
+	logger.Info("SCOM performance query",
+		"from", from.UTC().Format(time.RFC3339), "to", to.UTC().Format(time.RFC3339),
+		"savedAggregation", string(agg), "chosen", string(choice.Aggregation), "view", view, "reason", choice.Reason,
+		"retentionAvailable", retentionErr == nil && len(retention) > 0,
+		"maxDataAgeDays", r.MaxDataAgeDays, "intervalMinutes", r.IntervalMinutes, "lastGrooming", r.LastGrooming.Time.UTC().Format(time.RFC3339),
+		"maxDataPoints", budget.MaxDataPoints, "interval", budget.Interval.String(), "targetBucket", choice.Target.String(),
+		"firstSample", firstTS.UTC().Format(time.RFC3339), "lastSample", lastTS.UTC().Format(time.RFC3339),
+		"rows", rowCount, "series", len(order), "counterIds", len(counterIDs), "entityIds", len(entityIDs),
+		"retentionDuration", retentionDuration.String(), "queryDuration", time.Since(queryStarted).String(), "totalDuration", time.Since(started).String(),
+	)
 
 	frames := make([]*data.Frame, 0, len(order))
 	for _, key := range order {
@@ -342,6 +384,15 @@ func QueryPerformance(ctx context.Context, db *sql.DB, counterIDs []string, obje
 			TypeVersion: data.FrameTypeVersion{0, 1},
 		}
 		frames = append(frames, frame)
+	}
+
+	// Notices go on the first frame. With no data, an empty frame carries
+	// them so the panel still explains why (e.g. range predates retention).
+	if len(choice.Notices) > 0 {
+		if len(frames) == 0 {
+			frames = append(frames, data.NewFrame("").SetMeta(&data.FrameMeta{}))
+		}
+		frames[0].Meta.Notices = append(frames[0].Meta.Notices, choice.Notices...)
 	}
 	return frames, nil
 }

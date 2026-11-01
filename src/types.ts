@@ -46,7 +46,11 @@ export type SCOMQueryType = 'performance' | 'alerts' | 'health' | 'properties' |
 
 export type ClassSearchBy = 'name' | 'displayName';
 
-export type Aggregation = 'raw' | 'hourly' | 'daily';
+// 'auto' picks raw/hourly/daily per request from the time range, the panel's
+// point budget and the warehouse's retention — see choosePerfGrain in
+// pkg/scom/perfgrain.go. An unset aggregation (queries saved before 'auto'
+// existed, or without the default) has always run as 'raw' and still does.
+export type Aggregation = 'auto' | 'raw' | 'hourly' | 'daily';
 
 // Which frames a Health query returns. Left unset, the backend treats it the
 // same as 'both' — see HealthMode in pkg/scom/query.go.
@@ -115,7 +119,7 @@ export interface MyQuery extends DataQuery {
 
 export const DEFAULT_QUERY: Partial<MyQuery> = {
   queryType: 'performance',
-  aggregation: 'hourly',
+  aggregation: 'auto',
   // 0 = New, one of SCOM's built-in resolution states (guaranteed present,
   // unlike custom ones). An alerts query with nothing scoped runs against
   // every alert in the management group, so this keeps a fresh query cheap
