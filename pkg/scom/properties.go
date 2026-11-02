@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/data"
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 // SCOM auto-generates a SQL table (and, for many classes, a view joining the
@@ -46,10 +49,13 @@ func quoteIdent(name string) string {
 	return "[" + strings.ReplaceAll(name, "]", "]]") + "]"
 }
 
+// resolveTypeName looks a class id up by its uniqueidentifier column, so SQL
+// Server can seek on it (converting the column to text for every row couldn't
+// use the index). classID must already be a valid GUID (see ValidateIDs).
 func resolveTypeName(ctx context.Context, db *sql.DB, classID string) (string, error) {
 	var typeName string
 	err := db.QueryRowContext(ctx,
-		`SELECT TypeName FROM dbo.ManagedType WHERE CONVERT(varchar(64), ManagedTypeId) = @classId`,
+		`SELECT TypeName FROM dbo.ManagedType WHERE ManagedTypeId = CONVERT(uniqueidentifier, @classId)`,
 		sql.Named("classId", classID),
 	).Scan(&typeName)
 	if err != nil {
@@ -85,60 +91,91 @@ ORDER BY ORDINAL_POSITION`, sql.Named("viewName", viewName))
 	return cols, rows.Err()
 }
 
+// classPropertyLists is one class's typed-property view and its columns (see
+// resolveClassView). ViewName is "" for a class with no typed properties.
+type classPropertyLists struct {
+	TypeName string
+	ViewName string
+	Columns  []string
+}
+
+// classPropertiesByType returns a class's property view and columns, cached
+// for metadataCacheTTL: they only change when a management pack is imported.
+func (db *DB) classPropertiesByType(ctx context.Context, typeName string) (classPropertyLists, error) {
+	return db.cache().classProps.get(ctx, cacheKey("type", typeName), metadataCacheTTL,
+		func(ctx context.Context) (classPropertyLists, error) {
+			viewName, err := resolveClassView(ctx, db.Operational, typeName)
+			if err != nil {
+				return classPropertyLists{}, err
+			}
+			props := classPropertyLists{TypeName: typeName, ViewName: viewName}
+			if viewName != "" {
+				cols, err := classViewColumns(ctx, db.Operational, viewName)
+				if err != nil {
+					return classPropertyLists{}, fmt.Errorf("list properties for %s: %w", typeName, err)
+				}
+				props.Columns = cols
+			}
+			return props, nil
+		})
+}
+
+// classPropertiesByID is classPropertiesByType for a class id.
+func (db *DB) classPropertiesByID(ctx context.Context, classID string) (classPropertyLists, error) {
+	return db.cache().classProps.get(ctx, cacheKey("class", strings.ToLower(classID)), metadataCacheTTL,
+		func(ctx context.Context) (classPropertyLists, error) {
+			typeName, err := resolveTypeName(ctx, db.Operational, classID)
+			if err != nil {
+				return classPropertyLists{}, err
+			}
+			return db.classPropertiesByType(ctx, typeName)
+		})
+}
+
+// baseEntityColumns are the dbo.BaseManagedEntity columns offered for every
+// class, in the order the picker lists them.
+var baseEntityColumns = []string{"DisplayName", "FullName", "Path", "IsManaged"}
+
 // ListPropertyNames backs the /properties resource endpoint used by the
 // query editor's property picker.
-func ListPropertyNames(ctx context.Context, db *sql.DB, classID string) ([]Option, error) {
-	typeName, err := resolveTypeName(ctx, db, classID)
+func ListPropertyNames(ctx context.Context, db *DB, classID string) ([]Option, error) {
+	props, err := db.classPropertiesByID(ctx, classID)
 	if err != nil {
 		return nil, err
 	}
-
-	viewName, err := resolveClassView(ctx, db, typeName)
-	if err != nil {
-		return nil, err
+	out := make([]Option, 0, len(baseEntityColumns)+len(props.Columns))
+	for _, c := range baseEntityColumns {
+		out = append(out, Option{Value: c, Label: c})
 	}
-
-	var cols []string
-	if viewName != "" {
-		cols, err = classViewColumns(ctx, db, viewName)
-		if err != nil {
-			return nil, fmt.Errorf("list properties for %s: %w", typeName, err)
-		}
-	}
-
-	// Always-present base fields, not tied to the per-class view.
-	out := []Option{
-		{Value: "DisplayName", Label: "DisplayName"},
-		{Value: "FullName", Label: "FullName"},
-		{Value: "Path", Label: "Path"},
-		{Value: "IsManaged", Label: "IsManaged"},
-	}
-	for _, c := range cols {
+	for _, c := range props.Columns {
 		out = append(out, Option{Value: c, Label: c})
 	}
 	return out, nil
 }
 
-var baseEntityColumns = map[string]bool{
-	"DisplayName": true, "FullName": true, "Path": true, "IsManaged": true,
-}
-
 // QueryProperties returns one frame per class among the selected instances,
 // with one row per instance and one field per requested property. Instances
 // are grouped by class because typed properties live in per-class views.
-func QueryProperties(ctx context.Context, db *sql.DB, instanceIDs []string, propertyNames []string) ([]*data.Frame, error) {
+// Frames come back sorted by class name and rows by instance name, so a
+// table's frame picker and row order stay put across refreshes.
+func QueryProperties(ctx context.Context, db *DB, instanceIDs []string, propertyNames []string) ([]*data.Frame, error) {
 	if len(instanceIDs) == 0 {
 		return nil, nil
 	}
 
-	groups, err := groupInstancesByClass(ctx, db, instanceIDs)
+	groups, err := groupInstancesByClass(ctx, db.Operational, instanceIDs)
 	if err != nil {
 		return nil, err
 	}
+	typeNames := make([]string, 0, len(groups))
+	for typeName := range groups {
+		typeNames = append(typeNames, typeName)
+	}
+	slices.Sort(typeNames)
 
-	var frames []*data.Frame
-	for typeName, ids := range groups {
-		frame, err := queryPropertiesForClass(ctx, db, typeName, ids, propertyNames)
+	frames := make([]*data.Frame, 0, len(typeNames))
+	for _, typeName := range typeNames {
+		frame, err := queryPropertiesForClass(ctx, db, typeName, groups[typeName], propertyNames)
 		if err != nil {
 			return nil, fmt.Errorf("properties for class %s: %w", typeName, err)
 		}
@@ -178,51 +215,36 @@ WHERE bme.BaseManagedEntityId IN (SELECT Id FROM %s)`, propertiesScopeTempTable)
 	return groups, rows.Err()
 }
 
-func queryPropertiesForClass(ctx context.Context, db *sql.DB, typeName string, instanceIDs []string, requested []string) (*data.Frame, error) {
-	viewName, err := resolveClassView(ctx, db, typeName)
-	if err != nil {
-		return nil, err
+// buildPropertiesQuery selects the requested properties of instanceIDs from
+// dbo.BaseManagedEntity and, when needed, the class's property view. Only
+// names that are a known base column or an introspected column of the view
+// are ever selected — a requested name is never interpolated into SQL as is.
+// No valid names selects every property.
+func buildPropertiesQuery(props classPropertyLists, instanceIDs, requested []string) (string, []any) {
+	available := map[string]bool{}
+	for _, c := range props.Columns {
+		available[c] = true
 	}
+	isBase := func(name string) bool { return slices.Contains(baseEntityColumns, name) }
 
-	var available []string
-	if viewName != "" {
-		available, err = classViewColumns(ctx, db, viewName)
-		if err != nil {
-			return nil, err
-		}
-	}
-	availableSet := map[string]bool{}
-	for _, c := range available {
-		availableSet[c] = true
-	}
-
-	// Only select property names that are either a known base field or an
-	// introspected column of this class's view — never interpolate the raw
-	// requested name straight into SQL.
 	var selected []string
 	for _, name := range requested {
-		if baseEntityColumns[name] || availableSet[name] {
+		if isBase(name) || available[name] {
 			selected = append(selected, name)
 		}
 	}
 	if len(selected) == 0 {
-		selected = append([]string{"DisplayName"}, available...)
+		selected = append([]string{"DisplayName"}, props.Columns...)
 	}
 
 	needsClassView := false
-	for _, name := range selected {
-		if !baseEntityColumns[name] {
-			needsClassView = true
-			break
-		}
-	}
-
 	selectCols := make([]string, len(selected))
 	for i, name := range selected {
-		if baseEntityColumns[name] {
+		if isBase(name) {
 			selectCols[i] = "bme." + quoteIdent(name)
 		} else {
 			selectCols[i] = "cv." + quoteIdent(name)
+			needsClassView = true
 		}
 	}
 
@@ -232,34 +254,44 @@ SELECT bme.DisplayName AS InstanceDisplayName, %s
 FROM dbo.BaseManagedEntity bme`, strings.Join(selectCols, ", "))
 	if needsClassView {
 		query += fmt.Sprintf(`
-INNER JOIN dbo.%s cv ON cv.BaseManagedEntityId = bme.BaseManagedEntityId`, quoteIdent(viewName))
+INNER JOIN dbo.%s cv ON cv.BaseManagedEntityId = bme.BaseManagedEntityId`, quoteIdent(props.ViewName))
 	}
 	query += fmt.Sprintf(`
-WHERE bme.BaseManagedEntityId IN (SELECT Id FROM %s)`, propertiesScopeTempTable)
+WHERE bme.BaseManagedEntityId IN (SELECT Id FROM %s)
+ORDER BY bme.DisplayName`, propertiesScopeTempTable)
+	return query, args
+}
 
-	rows, err := db.QueryContext(ctx, query, args...)
+func queryPropertiesForClass(ctx context.Context, db *DB, typeName string, instanceIDs []string, requested []string) (*data.Frame, error) {
+	props, err := db.classPropertiesByType(ctx, typeName)
+	if err != nil {
+		return nil, err
+	}
+
+	query, args := buildPropertiesQuery(props, instanceIDs, requested)
+	rows, err := db.Operational.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	cols, err := rows.Columns()
+	colTypes, err := rows.ColumnTypes()
 	if err != nil {
 		return nil, err
 	}
+	columns := make([]*propertyColumn, len(colTypes))
+	targets := make([]any, len(colTypes))
+	for i, ct := range colTypes {
+		columns[i] = &propertyColumn{name: ct.Name(), kind: propertyKindOf(ct.DatabaseTypeName())}
+		targets[i] = columns[i].target()
+	}
 
-	values := make([][]string, len(cols))
 	for rows.Next() {
-		scanArgs := make([]any, len(cols))
-		raw := make([]sql.NullString, len(cols))
-		for i := range raw {
-			scanArgs[i] = &raw[i]
-		}
-		if err := rows.Scan(scanArgs...); err != nil {
+		if err := rows.Scan(targets...); err != nil {
 			return nil, err
 		}
-		for i, v := range raw {
-			values[i] = append(values[i], v.String)
+		for _, c := range columns {
+			c.take()
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -267,8 +299,125 @@ WHERE bme.BaseManagedEntityId IN (SELECT Id FROM %s)`, propertiesScopeTempTable)
 	}
 
 	frame := data.NewFrame(typeName)
-	for i, col := range cols {
-		frame.Fields = append(frame.Fields, data.NewField(col, nil, values[i]))
+	for _, c := range columns {
+		frame.Fields = append(frame.Fields, c.field())
 	}
 	return frame, nil
+}
+
+// propertyKind is how a property column is typed in the frame, so numbers
+// sort and threshold as numbers and dates display as dates.
+type propertyKind int
+
+const (
+	propertyString propertyKind = iota
+	propertyInt
+	propertyFloat
+	propertyBool
+	propertyTime
+	propertyGUID
+)
+
+func propertyKindOf(dbType string) propertyKind {
+	switch strings.ToUpper(dbType) {
+	case "TINYINT", "SMALLINT", "INT", "BIGINT":
+		return propertyInt
+	case "FLOAT", "REAL", "DECIMAL", "NUMERIC", "MONEY", "SMALLMONEY":
+		return propertyFloat
+	case "BIT":
+		return propertyBool
+	case "DATETIME", "DATETIME2", "SMALLDATETIME", "DATE", "DATETIMEOFFSET":
+		return propertyTime
+	case "UNIQUEIDENTIFIER":
+		return propertyGUID
+	default:
+		return propertyString
+	}
+}
+
+// propertyColumn scans one column, row by row, into a typed field. NULLs
+// become empty strings in text columns (as before) and nulls elsewhere.
+type propertyColumn struct {
+	name string
+	kind propertyKind
+
+	strs   []string
+	ints   []*int64
+	floats []*float64
+	bools  []*bool
+	times  []*time.Time
+
+	ns sql.NullString
+	ni sql.NullInt64
+	nf sql.NullFloat64
+	nb sql.NullBool
+	nt sql.NullTime
+	ng mssql.NullUniqueIdentifier
+}
+
+func (c *propertyColumn) target() any {
+	switch c.kind {
+	case propertyInt:
+		return &c.ni
+	case propertyFloat:
+		return &c.nf
+	case propertyBool:
+		return &c.nb
+	case propertyTime:
+		return &c.nt
+	case propertyGUID:
+		return &c.ng
+	default:
+		return &c.ns
+	}
+}
+
+func (c *propertyColumn) take() {
+	switch c.kind {
+	case propertyInt:
+		c.ints = append(c.ints, nullable(c.ni.Int64, c.ni.Valid))
+	case propertyFloat:
+		c.floats = append(c.floats, nullable(c.nf.Float64, c.nf.Valid))
+	case propertyBool:
+		c.bools = append(c.bools, nullable(c.nb.Bool, c.nb.Valid))
+	case propertyTime:
+		c.times = append(c.times, nullable(c.nt.Time, c.nt.Valid))
+	case propertyGUID:
+		if c.ng.Valid {
+			c.strs = append(c.strs, c.ng.String())
+		} else {
+			c.strs = append(c.strs, "")
+		}
+	default:
+		c.strs = append(c.strs, c.ns.String)
+	}
+}
+
+func (c *propertyColumn) field() *data.Field {
+	switch c.kind {
+	case propertyInt:
+		return data.NewField(c.name, nil, nonNil(c.ints))
+	case propertyFloat:
+		return data.NewField(c.name, nil, nonNil(c.floats))
+	case propertyBool:
+		return data.NewField(c.name, nil, nonNil(c.bools))
+	case propertyTime:
+		return data.NewField(c.name, nil, nonNil(c.times))
+	default:
+		return data.NewField(c.name, nil, nonNil(c.strs))
+	}
+}
+
+func nullable[T any](v T, valid bool) *T {
+	if !valid {
+		return nil
+	}
+	return &v
+}
+
+func nonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }

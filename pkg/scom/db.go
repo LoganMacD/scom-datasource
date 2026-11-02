@@ -3,7 +3,10 @@ package scom
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/a-logan/scom-datasource/pkg/models"
 	mssql "github.com/microsoft/go-mssqldb"
@@ -26,21 +29,47 @@ SET CONCAT_NULL_YIELDS_NULL ON;
 SET NUMERIC_ROUNDABORT OFF;
 SET QUOTED_IDENTIFIER ON;`
 
+// Connection pool limits, per database, per data source.
+//
+// Go's default keeps only 2 idle connections, so every refresh of a busy
+// dashboard opened a new SQL login (TLS plus NTLM/Kerberos) for each
+// concurrent query beyond 2. Keeping more idle connections avoids that. The
+// cap on open connections makes a burst of panels queue for a connection
+// instead of flooding the SCOM SQL Server, and the lifetime limit moves
+// connections over after a failover or DNS change.
+const (
+	maxOpenConnsPerDB = 20
+	maxIdleConnsPerDB = 10
+	connMaxIdleTime   = 10 * time.Minute
+	connMaxLifetime   = time.Hour
+)
+
 func openWithSessionInit(dsn string) (*sql.DB, error) {
 	connector, err := mssql.NewConnector(dsn)
 	if err != nil {
 		return nil, err
 	}
 	connector.SessionInitSQL = sessionInitSQL
-	return sql.OpenDB(connector), nil
+	db := sql.OpenDB(connector)
+	configurePool(db)
+	return db, nil
+}
+
+func configurePool(db *sql.DB) {
+	db.SetMaxOpenConns(maxOpenConnsPerDB)
+	db.SetMaxIdleConns(maxIdleConnsPerDB)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
+	db.SetConnMaxLifetime(connMaxLifetime)
 }
 
 // DB pairs the two SQL Server connections a SCOM data source instance needs:
 // the Operational database (class/group/instance browsing, alerts, health)
-// and the Data Warehouse (performance history).
+// and the Data Warehouse (performance history), plus the data source's
+// cached lookups (see dbCaches).
 type DB struct {
 	Operational *sql.DB
 	Warehouse   *sql.DB
+	caches      *dbCaches
 }
 
 func Open(settings *models.PluginSettings) (*DB, error) {
@@ -64,7 +93,16 @@ func Open(settings *models.PluginSettings) (*DB, error) {
 		return nil, fmt.Errorf("warehouse connection: %w", err)
 	}
 
-	return &DB{Operational: opDB, Warehouse: dwDB}, nil
+	return &DB{Operational: opDB, Warehouse: dwDB, caches: newDBCaches()}, nil
+}
+
+// cache returns the data source's caches. A DB built without Open (in tests)
+// has none, and every lookup then goes straight to the database.
+func (db *DB) cache() *dbCaches {
+	if db.caches == nil {
+		return &dbCaches{}
+	}
+	return db.caches
 }
 
 func (db *DB) Close() {
@@ -76,24 +114,56 @@ func (db *DB) Close() {
 	}
 }
 
-// CheckHealth pings both connections and runs a cheap query against a known
-// table/view on each so schema or permission problems surface immediately
-// rather than only on first real query.
-func (db *DB) CheckHealth(ctx context.Context) error {
-	if err := db.Operational.PingContext(ctx); err != nil {
-		return fmt.Errorf("operational database: %w", err)
-	}
-	if err := probe(ctx, db.Operational, "SELECT TOP 1 BaseManagedEntityId FROM dbo.BaseManagedEntity"); err != nil {
-		return fmt.Errorf("operational database (dbo.BaseManagedEntity): %w", err)
-	}
+// HealthReport is the result of DB.CheckHealth. Operational and Warehouse are
+// nil when that database is reachable and looks like the right SCOM
+// database. RetentionErr is set when the warehouse works but its retention
+// settings can't be read, which only affects Auto aggregation (it falls back
+// to hourly or daily data).
+type HealthReport struct {
+	Operational  error
+	Warehouse    error
+	RetentionErr error
+}
 
-	if err := db.Warehouse.PingContext(ctx); err != nil {
-		return fmt.Errorf("data warehouse: %w", err)
-	}
-	if err := probe(ctx, db.Warehouse, "SELECT TOP 1 PerformanceRuleInstanceRowId FROM Perf.vPerfHourly"); err != nil {
-		return fmt.Errorf("data warehouse (Perf.vPerfHourly): %w", err)
-	}
+var errNoRetentionRows = errors.New("dbo.StandardDatasetAggregation has no rows for the Perf dataset")
 
+// CheckHealth checks both databases at the same time, so the config page's
+// Save & test reports both rather than stopping at the first failure. Each
+// check pings the server and reads a known table or view, so wrong database
+// names and missing permissions show up here, not on the first dashboard.
+func (db *DB) CheckHealth(ctx context.Context) HealthReport {
+	var report HealthReport
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		report.Operational = checkDatabase(ctx, db.Operational, "dbo.BaseManagedEntity",
+			"SELECT TOP 1 BaseManagedEntityId FROM dbo.BaseManagedEntity")
+	}()
+	go func() {
+		defer wg.Done()
+		report.Warehouse = checkDatabase(ctx, db.Warehouse, "Perf.vPerfHourly",
+			"SELECT TOP 1 PerformanceRuleInstanceRowId FROM Perf.vPerfHourly")
+		if report.Warehouse != nil {
+			return
+		}
+		retention, err := loadPerfRetention(ctx, db.Warehouse)
+		if err == nil && len(retention) == 0 {
+			err = errNoRetentionRows
+		}
+		report.RetentionErr = err
+	}()
+	wg.Wait()
+	return report
+}
+
+func checkDatabase(ctx context.Context, conn *sql.DB, object, query string) error {
+	if err := conn.PingContext(ctx); err != nil {
+		return err
+	}
+	if err := probe(ctx, conn, query); err != nil {
+		return fmt.Errorf("can't read %s: %w", object, err)
+	}
 	return nil
 }
 

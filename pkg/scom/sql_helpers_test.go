@@ -123,3 +123,46 @@ func TestIDScopeTempTable(t *testing.T) {
 		}
 	})
 }
+
+func TestInt64InClause(t *testing.T) {
+	clause, args := int64InClause("ctr", []int64{5, 9})
+	if clause != "(@ctr0, @ctr1)" {
+		t.Fatalf("got clause %q", clause)
+	}
+	if v := args[1].(sql.NamedArg).Value; v != int64(9) {
+		t.Errorf("got %T %v, want int64 9", v, v)
+	}
+	if clause, args := int64InClause("ctr", nil); clause != "" || args != nil {
+		t.Errorf("got (%q, %v) for no values, want empty", clause, args)
+	}
+}
+
+func TestIntScopeTempTable(t *testing.T) {
+	query, args := intScopeTempTable("#Rows", "rowIds", []int64{3, 1})
+	for _, want := range []string{
+		"CREATE TABLE #Rows (Id int PRIMARY KEY)",
+		"SELECT DISTINCT CONVERT(int, value)",
+		"FROM STRING_SPLIT(@rowIds, ',')",
+	} {
+		if !strings.Contains(query, want) {
+			t.Errorf("query missing %q\nfull query:\n%s", want, query)
+		}
+	}
+	if len(args) != 1 || args[0].(sql.NamedArg).Value != mssql.VarCharMax("3,1") {
+		t.Errorf("got args %v, want one VarCharMax param", args)
+	}
+}
+
+func TestMonitorOperationalStateApplyAlias(t *testing.T) {
+	got := monitorOperationalStateApply("mosNew", "s.MonitorId", "sce.NewHealthState")
+	for _, want := range []string{
+		"OUTER APPLY (",
+		"SELECT TOP 1 mosi.MonitorOperationalStateName",
+		"WHERE mosi.MonitorId = s.MonitorId AND mosi.HealthState = sce.NewHealthState",
+		") mosNew",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("apply missing %q\n%s", want, got)
+		}
+	}
+}

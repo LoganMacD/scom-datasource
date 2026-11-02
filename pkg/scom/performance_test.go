@@ -1,6 +1,7 @@
 package scom
 
 import (
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
@@ -25,8 +26,8 @@ func TestAggregationTable(t *testing.T) {
 	for _, c := range cases {
 		table, col, err := aggregationTable(c.agg)
 		if c.wantErr {
-			if err == nil {
-				t.Errorf("aggregationTable(%q): got no error, want one", c.agg)
+			if !IsBadRequest(err) {
+				t.Errorf("aggregationTable(%q): got %v, want a bad request error", c.agg, err)
 			}
 			continue
 		}
@@ -39,70 +40,105 @@ func TestAggregationTable(t *testing.T) {
 	}
 }
 
+func TestPerfValueColumn(t *testing.T) {
+	cases := []struct {
+		agg  Aggregation
+		stat Statistic
+		want string
+	}{
+		{AggregationHourly, "", "AverageValue"}, // unset keeps the old behaviour
+		{AggregationHourly, StatisticAverage, "AverageValue"},
+		{AggregationHourly, StatisticMin, "MinValue"},
+		{AggregationDaily, StatisticMax, "MaxValue"},
+		// A raw row is one sample, so every statistic is the sample.
+		{AggregationRaw, StatisticMax, "SampleValue"},
+		{"", StatisticMin, "SampleValue"},
+	}
+	for _, c := range cases {
+		got, err := perfValueColumn(c.agg, c.stat)
+		if err != nil || got != c.want {
+			t.Errorf("perfValueColumn(%q, %q) = (%q, %v), want %q", c.agg, c.stat, got, err, c.want)
+		}
+	}
+	if _, err := perfValueColumn(AggregationHourly, "median"); !IsBadRequest(err) {
+		t.Errorf("got %v for an unknown statistic, want a bad request error", err)
+	}
+}
+
 func TestBuildPerformanceQuery(t *testing.T) {
 	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 
-	t.Run("hourly aggregation selects AverageValue from vPerfHourly", func(t *testing.T) {
-		query, args, err := buildPerformanceQuery([]string{"ctr-1"}, "", "", nil, AggregationHourly, from, to)
+	t.Run("hourly aggregation reads AverageValue from vPerfHourly, ids only", func(t *testing.T) {
+		query, args, err := buildPerformanceQuery([]int64{1}, "", "", nil, AggregationHourly, "", from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(query, "FROM Perf.vPerfHourly p") {
-			t.Errorf("query missing Perf.vPerfHourly: %s", query)
+		for _, want := range []string{
+			"FROM Perf.vPerfHourly p",
+			"p.AverageValue AS Value",
+			"p.PerformanceRuleInstanceRowId,",
+			"p.ManagedEntityRowId,",
+			"p.DateTime,",
+			"WHERE p.PerformanceRuleInstanceRowId IN (@ctr0)",
+			"AND p.DateTime >= @from AND p.DateTime <= @to",
+		} {
+			if !strings.Contains(query, want) {
+				t.Errorf("query missing %q\nfull query:\n%s", want, query)
+			}
 		}
-		if !strings.Contains(query, "p.AverageValue AS Value") {
-			t.Errorf("query missing AverageValue column: %s", query)
-		}
-		if !strings.Contains(query, "INNER JOIN dbo.vPerformanceRuleInstance pri ON p.PerformanceRuleInstanceRowId = pri.PerformanceRuleInstanceRowId") ||
-			!strings.Contains(query, "INNER JOIN dbo.vPerformanceRule pr ON pri.RuleRowId = pr.RuleRowId") ||
-			!strings.Contains(query, "INNER JOIN dbo.vManagedEntity me ON p.ManagedEntityRowId = me.ManagedEntityRowId") ||
-			!strings.Contains(query, "LEFT JOIN dbo.vManagedEntity tme ON tme.ManagedEntityRowId = COALESCE(me.TopLevelHostManagedEntityRowId, me.ManagedEntityRowId)") {
-			t.Errorf("query missing expected joins: %s", query)
-		}
-		if !strings.Contains(query, "tme.ManagedEntityDefaultName AS HostDisplayName") {
-			t.Errorf("query missing top-level host display name column: %s", query)
-		}
-		if !strings.Contains(query, "CONVERT(varchar(64), me.ManagedEntityGuid) AS ManagedEntityGuid") {
-			t.Errorf("query missing managed entity guid column: %s", query)
-		}
-		if !strings.Contains(query, "WHERE p.PerformanceRuleInstanceRowId IN (@ctr0)") {
-			t.Errorf("query missing counter id filter: %s", query)
-		}
-		if strings.Contains(query, "ManagedEntityGuid IN") {
-			t.Errorf("query should not filter by entity when entityIDs is empty: %s", query)
-		}
-		if strings.Contains(query, "#EntityScope") {
-			t.Errorf("query should not set up an entity scope temp table when entityIDs is empty: %s", query)
+		// Names come from buildPerformanceSeriesQuery, once per series —
+		// not repeated on every fact row.
+		for _, avoid := range []string{"ObjectName", "ManagedEntityDefaultName", "JOIN", "ORDER BY", "#EntityScope"} {
+			if strings.Contains(query, avoid) {
+				t.Errorf("query should not contain %q\nfull query:\n%s", avoid, query)
+			}
 		}
 		if len(args) != 3 { // from, to, ctr0
 			t.Fatalf("got %d args, want 3", len(args))
 		}
+		if v := args[2].(sql.NamedArg).Value; v != int64(1) {
+			t.Errorf("counter id bound as %T %v, want int64 1", v, v)
+		}
+	})
+
+	t.Run("statistic picks the rollup column", func(t *testing.T) {
+		query, _, err := buildPerformanceQuery([]int64{1}, "", "", nil, AggregationDaily, StatisticMax, from, to)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(query, "FROM Perf.vPerfDaily p") || !strings.Contains(query, "p.MaxValue AS Value") {
+			t.Errorf("query should read MaxValue from Perf.vPerfDaily:\n%s", query)
+		}
 	})
 
 	t.Run("raw aggregation selects SampleValue from vPerfRaw", func(t *testing.T) {
-		query, _, err := buildPerformanceQuery([]string{"ctr-1"}, "", "", nil, AggregationRaw, from, to)
+		query, _, err := buildPerformanceQuery([]int64{1}, "", "", nil, AggregationRaw, "", from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !strings.Contains(query, "FROM Perf.vPerfRaw p") || !strings.Contains(query, "p.SampleValue AS Value") {
-			t.Errorf("query should read SampleValue from Perf.vPerfRaw: %s", query)
+			t.Errorf("query should read SampleValue from Perf.vPerfRaw:\n%s", query)
 		}
 	})
 
-	t.Run("entityIDs scopes results via a temp table join, not a literal IN list", func(t *testing.T) {
-		query, args, err := buildPerformanceQuery([]string{"ctr-1"}, "", "", []string{"ent-1", "ent-2"}, AggregationHourly, from, to)
+	t.Run("entityIDs scope the fact rows through temp tables, not a literal IN list", func(t *testing.T) {
+		query, args, err := buildPerformanceQuery([]int64{1}, "", "", []string{"ent-1", "ent-2"}, AggregationHourly, "", from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(query, "CREATE TABLE #EntityScope") {
-			t.Errorf("query missing entity scope temp table creation: %s", query)
-		}
-		if !strings.Contains(query, "INSERT INTO #EntityScope") {
-			t.Errorf("query missing entity scope temp table population: %s", query)
-		}
-		if !strings.Contains(query, "AND me.ManagedEntityGuid IN (SELECT Id FROM #EntityScope)") {
-			t.Errorf("query missing entity id filter joined against the temp table: %s", query)
+		for _, want := range []string{
+			"CREATE TABLE #EntityScope",
+			"INSERT INTO #EntityScope",
+			// guids are turned into the fact view's own row ids once, so the
+			// big view is filtered on its own column.
+			"CREATE TABLE #EntityRows (Id int PRIMARY KEY)",
+			"INNER JOIN #EntityScope s ON s.Id = me.ManagedEntityGuid",
+			"AND p.ManagedEntityRowId IN (SELECT Id FROM #EntityRows)",
+		} {
+			if !strings.Contains(query, want) {
+				t.Errorf("query missing %q\nfull query:\n%s", want, query)
+			}
 		}
 		// from, to, ctr0, plus exactly one bound param for the entity scope
 		// regardless of how many entity ids there are — see idScopeTempTable.
@@ -111,16 +147,22 @@ func TestBuildPerformanceQuery(t *testing.T) {
 		}
 	})
 
-	t.Run("no counter ids matches by object and counter name, with no IN list", func(t *testing.T) {
-		query, args, err := buildPerformanceQuery(nil, "Processor", "% Processor Time", nil, AggregationHourly, from, to)
+	t.Run("no counter ids matches by object and counter name through a temp table", func(t *testing.T) {
+		query, args, err := buildPerformanceQuery(nil, "Processor", "% Processor Time", nil, AggregationHourly, "", from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(query, "WHERE pr.ObjectName = @object AND pr.CounterName = @counterName") {
-			t.Errorf("query missing object/counter name filter: %s", query)
+		for _, want := range []string{
+			"CREATE TABLE #CounterRows (Id int PRIMARY KEY)",
+			"WHERE pr.ObjectName = @object AND pr.CounterName = @counterName",
+			"p.PerformanceRuleInstanceRowId IN (SELECT Id FROM #CounterRows)",
+		} {
+			if !strings.Contains(query, want) {
+				t.Errorf("query missing %q\nfull query:\n%s", want, query)
+			}
 		}
-		if strings.Contains(query, "PerformanceRuleInstanceRowId IN") {
-			t.Errorf("query should not use a counter id IN list: %s", query)
+		if strings.Contains(query, "@ctr0") {
+			t.Errorf("query should not use a counter id IN list:\n%s", query)
 		}
 		if len(args) != 4 { // from, to, object, counterName
 			t.Fatalf("got %d args, want 4", len(args))
@@ -128,9 +170,95 @@ func TestBuildPerformanceQuery(t *testing.T) {
 	})
 
 	t.Run("invalid aggregation errors instead of building a bad query", func(t *testing.T) {
-		_, _, err := buildPerformanceQuery([]string{"ctr-1"}, "", "", nil, "weekly", from, to)
-		if err == nil {
-			t.Fatal("got no error for an unsupported aggregation, want one")
+		if _, _, err := buildPerformanceQuery([]int64{1}, "", "", nil, "weekly", "", from, to); !IsBadRequest(err) {
+			t.Fatalf("got %v for an unsupported aggregation, want a bad request error", err)
+		}
+	})
+}
+
+func TestBuildPerformanceSeriesQuery(t *testing.T) {
+	query, args := buildPerformanceSeriesQuery([]int64{1, 2}, []int64{10})
+	for _, want := range []string{
+		"CREATE TABLE #SeriesCounters (Id int PRIMARY KEY)",
+		"FROM STRING_SPLIT(@seriesCounterIds, ',')",
+		"CREATE TABLE #SeriesEntities (Id int PRIMARY KEY)",
+		"FROM STRING_SPLIT(@seriesEntityIds, ',')",
+		"INNER JOIN dbo.vPerformanceRule pr ON pri.RuleRowId = pr.RuleRowId",
+		"WHERE pri.PerformanceRuleInstanceRowId IN (SELECT Id FROM #SeriesCounters)",
+		"LEFT JOIN dbo.vManagedEntity tme ON tme.ManagedEntityRowId = COALESCE(me.TopLevelHostManagedEntityRowId, me.ManagedEntityRowId)",
+		// ManagedEntityDefaultName is a computed alias of the nullable DisplayName.
+		"COALESCE(me.ManagedEntityDefaultName, me.Name, CONVERT(nvarchar(64), me.ManagedEntityGuid))",
+		"WHERE me.ManagedEntityRowId IN (SELECT Id FROM #SeriesEntities)",
+	} {
+		if !strings.Contains(query, want) {
+			t.Errorf("query missing %q\nfull query:\n%s", want, query)
+		}
+	}
+	if len(args) != 2 {
+		t.Fatalf("got %d args, want one per id list", len(args))
+	}
+}
+
+func TestPerfFrames(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	series := map[perfSeriesKey][]perfPoint{
+		{counterRowID: 1, entityRowID: 20}: {{t0.Add(time.Hour), 2}, {t0, 1}}, // out of order on purpose
+		{counterRowID: 1, entityRowID: 10}: {{t0, 5}},
+	}
+	counters := map[int64]perfCounterMeta{1: {object: "LogicalDisk", counter: "% Free Space", instance: "C:"}}
+	entities := map[int64]perfEntityMeta{
+		10: {guid: "guid-10", name: "zeta.contoso.com", host: "zeta.contoso.com"},
+		20: {guid: "guid-20", name: "alpha.contoso.com", host: "alpha.contoso.com"},
+	}
+
+	frames, first, last := perfFrames(series, counters, entities, "", false)
+	if len(frames) != 2 {
+		t.Fatalf("got %d frames, want 2", len(frames))
+	}
+
+	t.Run("frames are sorted by legend", func(t *testing.T) {
+		if frames[0].Name != "LogicalDisk - % Free Space [C:] (alpha.contoso.com)" {
+			t.Errorf("first frame is %q, want the alpha series", frames[0].Name)
+		}
+	})
+
+	t.Run("points are in time order", func(t *testing.T) {
+		times := frames[0].Fields[0]
+		if times.At(0).(time.Time) != t0 || times.At(1).(time.Time) != t0.Add(time.Hour) {
+			t.Errorf("times out of order: %v, %v", times.At(0), times.At(1))
+		}
+		if v := frames[0].Fields[1].At(0); v != 1.0 {
+			t.Errorf("first value %v, want 1 (sorted with its timestamp)", v)
+		}
+	})
+
+	t.Run("labels carry the names and ids", func(t *testing.T) {
+		want := data.Labels{
+			"object": "LogicalDisk", "counter": "% Free Space", "instance": "C:",
+			"entity": "alpha.contoso.com", "host": "alpha.contoso.com",
+			"counterId": "1", "entityId": "guid-20",
+		}
+		if got := frames[0].Fields[1].Labels; !reflect.DeepEqual(got, want) {
+			t.Errorf("got labels %v, want %v", got, want)
+		}
+	})
+
+	t.Run("frames declare timeseries-multi", func(t *testing.T) {
+		if frames[0].Meta == nil || frames[0].Meta.Type != data.FrameTypeTimeSeriesMulti {
+			t.Errorf("got meta %+v, want timeseries-multi", frames[0].Meta)
+		}
+	})
+
+	t.Run("reports the first and last sample", func(t *testing.T) {
+		if first != t0 || last != t0.Add(time.Hour) {
+			t.Errorf("got first=%v last=%v", first, last)
+		}
+	})
+
+	t.Run("filterable value adds the hidden copy", func(t *testing.T) {
+		frames, _, _ := perfFrames(series, counters, entities, "", true)
+		if len(frames[0].Fields) != 3 {
+			t.Errorf("got %d fields, want 3", len(frames[0].Fields))
 		}
 	})
 }

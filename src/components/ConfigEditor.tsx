@@ -6,6 +6,11 @@ import { ConnectionOptions, DEFAULT_CONNECTION, MyDataSourceOptions, MySecureJso
 
 interface Props extends DataSourcePluginOptionsEditorProps<MyDataSourceOptions, MySecureJsonData> {}
 
+// What the backend assumes when "same as operational database" is on and no
+// warehouse database name was saved — see DefaultWarehouseDatabase in
+// pkg/models/settings.go.
+const DEFAULT_WAREHOUSE_DATABASE = 'OperationsManagerDW';
+
 export function ConfigEditor({ options, onOptionsChange }: Props) {
   const { jsonData, secureJsonFields, secureJsonData } = options;
   const operational = jsonData.operational ?? DEFAULT_CONNECTION;
@@ -28,6 +33,13 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
     });
   };
 
+  // With "same as operational database" on, the warehouse shares the
+  // Operational database's server and credentials but keeps its own
+  // database name: SCOM always keeps the two in separate databases.
+  const warehouseShown: ConnectionOptions = sameAsOperational
+    ? { ...operational, database: warehouse.database ?? '' }
+    : warehouse;
+
   return (
     <Stack direction="column" gap={3}>
       <div>
@@ -45,7 +57,11 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
 
       <div>
         <h4>Data Warehouse</h4>
-        <InlineField label="Same as operational database" labelWidth={30}>
+        <InlineField
+          label="Same server as operational database"
+          labelWidth={36}
+          tooltip="Use the Operational database's server and credentials. The Data Warehouse database name is still set below."
+        >
           <Switch
             value={sameAsOperational}
             onChange={(e) => updateJsonData({ warehouseSameAsOperational: e.currentTarget.checked })}
@@ -53,13 +69,19 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
         </InlineField>
         <ConnectionSettingsEditor
           idPrefix="dw"
-          value={sameAsOperational ? operational : warehouse}
+          value={warehouseShown}
           password={sameAsOperational ? secureJsonData?.operationalPassword : secureJsonData?.warehousePassword}
           passwordConfigured={
             sameAsOperational ? secureJsonFields?.operationalPassword : secureJsonFields?.warehousePassword
           }
           disabled={sameAsOperational}
-          onChange={(warehouse: ConnectionOptions) => updateJsonData({ warehouse })}
+          databasePlaceholder={DEFAULT_WAREHOUSE_DATABASE}
+          databaseTooltip={
+            sameAsOperational ? `Leave blank for ${DEFAULT_WAREHOUSE_DATABASE}, the name SCOM setup uses` : undefined
+          }
+          onChange={(next: ConnectionOptions) =>
+            updateJsonData({ warehouse: sameAsOperational ? { ...warehouse, database: next.database } : next })
+          }
           onPasswordChange={(v) => updateSecret('warehousePassword', v)}
           onResetPassword={() => resetSecret('warehousePassword')}
         />

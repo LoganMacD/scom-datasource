@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"github.com/a-logan/scom-datasource/pkg/scom"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
+	"github.com/grafana/grafana-plugin-sdk-go/experimental/concurrent"
 )
 
 var (
@@ -20,6 +22,11 @@ var (
 	_ backend.CallResourceHandler   = (*Datasource)(nil)
 	_ instancemgmt.InstanceDisposer = (*Datasource)(nil)
 )
+
+// maxConcurrentQueries is how many of one request's queries (a panel's
+// queries A, B, C...) run at the same time. Kept small: each one can hit both
+// SCOM databases, and every panel on a dashboard sends its own request.
+const maxConcurrentQueries = 4
 
 // NewDatasource creates a new datasource instance: it opens (but does not
 // yet connect) both SQL Server connections for this data source instance.
@@ -44,122 +51,131 @@ type Datasource struct {
 }
 
 func (d *Datasource) Dispose() {
-	d.db.Close()
+	if d.db != nil {
+		d.db.Close()
+	}
 }
 
+// QueryData runs a request's queries in parallel (up to
+// maxConcurrentQueries), each with its own response.
 func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
-	response := backend.NewQueryDataResponse()
+	return concurrent.QueryData(ctx, req, func(ctx context.Context, q concurrent.Query) backend.DataResponse {
+		return d.query(ctx, datasourceUID(q.PluginContext), q.DataQuery)
+	}, maxConcurrentQueries)
+}
 
-	// The health tree drilldown link (see scom.QueryHealthCurrent) needs this
-	// data source instance's own UID to target itself when opening Explore.
-	var datasourceUID string
-	if req.PluginContext.DataSourceInstanceSettings != nil {
-		datasourceUID = req.PluginContext.DataSourceInstanceSettings.UID
+// datasourceUID is this data source instance's own UID, which the health
+// tree drilldown link (see scom.QueryHealthCurrent) needs to target itself
+// when opening Explore.
+func datasourceUID(pc backend.PluginContext) string {
+	if pc.DataSourceInstanceSettings == nil {
+		return ""
 	}
-
-	for _, q := range req.Queries {
-		response.Responses[q.RefID] = d.query(ctx, datasourceUID, q)
-	}
-
-	return response, nil
+	return pc.DataSourceInstanceSettings.UID
 }
 
 func (d *Datasource) query(ctx context.Context, datasourceUID string, query backend.DataQuery) backend.DataResponse {
 	var qm scom.QueryModel
 	if err := json.Unmarshal(query.JSON, &qm); err != nil {
-		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err))
+		return backend.ErrDataResponseWithSource(backend.StatusBadRequest, backend.ErrorSourceDownstream, fmt.Sprintf("json unmarshal: %v", err))
 	}
 	qm.Budget = scom.PointBudget{MaxDataPoints: query.MaxDataPoints, Interval: query.Interval}
 
 	frames, err := scom.Run(ctx, d.db, qm, query.TimeRange.From, query.TimeRange.To, datasourceUID)
 	if err != nil {
-		return backend.ErrDataResponse(backend.StatusInternal, err.Error())
+		return errorResponse(err)
 	}
-
-	var response backend.DataResponse
-	response.Frames = frames
-	return response
+	return backend.DataResponse{Frames: frames}
 }
 
-// CheckHealth pings both connections and probes a known table/view on each
-// so schema or permission problems surface on the config page's Test button,
-// not on the first real dashboard query.
+// errorResponse reports a failed query with an HTTP status, and tells
+// Grafana whether the plugin or what it talks to is at fault: an invalid
+// query (400) or a SQL Server, network or timeout failure is "downstream",
+// anything else is a plugin error.
+func errorResponse(err error) backend.DataResponse {
+	switch {
+	case scom.IsBadRequest(err):
+		return backend.ErrDataResponseWithSource(backend.StatusBadRequest, backend.ErrorSourceDownstream, err.Error())
+	case errors.Is(err, context.DeadlineExceeded):
+		return backend.ErrDataResponseWithSource(backend.StatusTimeout, backend.ErrorSourceDownstream, err.Error())
+	case scom.IsDownstreamError(err):
+		return backend.ErrDataResponseWithSource(backend.StatusInternal, backend.ErrorSourceDownstream, err.Error())
+	default:
+		return backend.ErrDataResponseWithSource(backend.StatusInternal, backend.ErrorSourcePlugin, err.Error())
+	}
+}
+
+// CheckHealth checks both databases (see scom.DB.CheckHealth) and reports
+// each one, with a hint for common failures, so the config page's Save &
+// test says what to fix rather than just that something failed.
 func (d *Datasource) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
-	if err := d.db.CheckHealth(ctx); err != nil {
-		return &backend.CheckHealthResult{
-			Status:  backend.HealthStatusError,
-			Message: err.Error(),
-		}, nil
-	}
-
-	return &backend.CheckHealthResult{
-		Status:  backend.HealthStatusOk,
-		Message: "Connected to the SCOM Operational database and Data Warehouse",
-	}, nil
+	return healthResult(d.db.CheckHealth(ctx)), nil
 }
 
-// CallResource backs the query editor's searchable dropdowns: classes,
-// groups, instances, performance counters, and property names.
+// healthResult turns a health report into what Save & test shows: a short
+// summary, with details (Grafana's "message" key) describing each database.
+func healthResult(r scom.HealthReport) *backend.CheckHealthResult {
+	result := &backend.CheckHealthResult{Status: backend.HealthStatusOk}
+	details := databaseResult("Operational database", r.Operational, false) + " " +
+		databaseResult("Data Warehouse", r.Warehouse, true)
+
+	switch {
+	case r.Operational != nil && r.Warehouse != nil:
+		result.Status = backend.HealthStatusError
+		result.Message = "Couldn't connect to the SCOM Operational database or the Data Warehouse"
+	case r.Operational != nil:
+		result.Status = backend.HealthStatusError
+		result.Message = "Couldn't connect to the SCOM Operational database"
+	case r.Warehouse != nil:
+		result.Status = backend.HealthStatusError
+		result.Message = "Couldn't connect to the SCOM Data Warehouse"
+	case r.RetentionErr != nil:
+		result.Message = "Connected to the SCOM Operational database and Data Warehouse, but Auto aggregation can't read the retention settings"
+		details = fmt.Sprintf("The warehouse account can't read the Data Warehouse retention settings (%v), so Auto aggregation will fall back to hourly or daily data. "+
+			"Give it SELECT on dbo.StandardDataset, dbo.StandardDatasetAggregation and dbo.StandardDatasetAggregationStorage to fix this.", r.RetentionErr)
+	default:
+		result.Message = "Connected to the SCOM Operational database and Data Warehouse"
+		return result
+	}
+
+	if body, err := json.Marshal(map[string]string{"message": details}); err == nil {
+		result.JSONDetails = body
+	}
+	return result
+}
+
+func databaseResult(name string, err error, warehouse bool) string {
+	if err == nil {
+		return name + ": OK."
+	}
+	line := fmt.Sprintf("%s: %s.", name, strings.TrimSuffix(err.Error(), "."))
+	if hint := scom.ConnectionHint(err, warehouse); hint != "" {
+		line += " " + hint
+	}
+	return line
+}
+
+// CallResource backs the query editor's searchable dropdowns (classes,
+// groups, instances, performance counters, property names, resolution
+// states) and the variable editor's value lists. Every endpoint returns a
+// JSON array of {value, label[, description]}.
 func (d *Datasource) CallResource(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) error {
 	u, err := url.Parse(req.URL)
 	if err != nil {
 		return sendJSONError(sender, http.StatusBadRequest, err)
 	}
-	q := u.Query()
-	search := q.Get("search")
 
-	var (
-		opts []scom.Option
-		errQ error
-	)
-
-	switch strings.TrimPrefix(req.Path, "/") {
-	case "classes":
-		opts, errQ = scom.SearchClasses(ctx, d.db.Operational, search, scom.SearchBy(q.Get("by")))
-
-	case "groups":
-		opts, errQ = scom.SearchGroups(ctx, d.db.Operational, search)
-
-	case "instances":
-		opts, errQ = scom.SearchInstances(ctx, d.db.Operational, scom.InstanceFilter{
-			ClassID: q.Get("classId"),
-			GroupID: q.Get("groupId"),
-			Search:  search,
-		})
-
-	case "counter-objects":
-		var instanceIDs []string
-		instanceIDs, errQ = d.resolveCounterScopeIDs(ctx, q)
-		if errQ == nil {
-			opts, errQ = scom.SearchCounterObjects(ctx, d.db.Warehouse, instanceIDs, search)
+	opts, err := d.resource(ctx, strings.TrimPrefix(req.Path, "/"), u.Query())
+	if err != nil {
+		status := http.StatusInternalServerError
+		var notFound *unknownResourceError
+		switch {
+		case errors.As(err, &notFound):
+			status = http.StatusNotFound
+		case scom.IsBadRequest(err):
+			status = http.StatusBadRequest
 		}
-
-	case "counter-names":
-		var instanceIDs []string
-		instanceIDs, errQ = d.resolveCounterScopeIDs(ctx, q)
-		if errQ == nil {
-			opts, errQ = scom.SearchCounterNames(ctx, d.db.Warehouse, instanceIDs, q.Get("object"), search)
-		}
-
-	case "counters":
-		var instanceIDs []string
-		instanceIDs, errQ = d.resolveCounterScopeIDs(ctx, q)
-		if errQ == nil {
-			opts, errQ = scom.SearchCounterInstances(ctx, d.db.Warehouse, instanceIDs, q.Get("object"), q.Get("counterName"), search)
-		}
-
-	case "properties":
-		opts, errQ = scom.ListPropertyNames(ctx, d.db.Operational, q.Get("classId"))
-
-	case "resolution-states":
-		opts, errQ = scom.ListResolutionStates(ctx, d.db.Operational)
-
-	default:
-		return sendJSONError(sender, http.StatusNotFound, fmt.Errorf("unknown resource path: %s", req.Path))
-	}
-
-	if errQ != nil {
-		return sendJSONError(sender, http.StatusInternalServerError, errQ)
+		return sendJSONError(sender, status, err)
 	}
 
 	// json.Marshal(nil slice) produces "null", which breaks the frontend
@@ -183,29 +199,81 @@ func (d *Datasource) CallResource(ctx context.Context, req *backend.CallResource
 	})
 }
 
-// resolveCounterScopeIDs figures out which top-level instances the counter
-// pickers (objects/names/instances) should be scoped to: explicit instanceId
-// params if given, else every instance in the chosen class/group scope
-// (scom.ResolveInstanceIDs), then widened to whatever each of those
-// hosts/contains (scom.ExpandHostedEntityIDs) — performance counters are
-// almost never collected on the top-level instance itself, but on the
-// objects it hosts (disks, SQL DB engines, processes, ...).
-func (d *Datasource) resolveCounterScopeIDs(ctx context.Context, q url.Values) ([]string, error) {
-	instanceIDs := q["instanceId"]
-	if len(instanceIDs) == 0 {
-		resolved, err := scom.ResolveInstanceIDs(ctx, d.db.Operational, q.Get("classId"), q.Get("groupId"))
+type unknownResourceError struct{ path string }
+
+func (e *unknownResourceError) Error() string { return "unknown resource path: " + e.path }
+
+func (d *Datasource) resource(ctx context.Context, path string, q url.Values) ([]scom.Option, error) {
+	search := q.Get("search")
+	classID, groupID, instanceIDs := q.Get("classId"), q.Get("groupId"), q["instanceId"]
+	if err := scom.ValidateIDs("class", classID); err != nil {
+		return nil, err
+	}
+	if err := scom.ValidateIDs("group", groupID); err != nil {
+		return nil, err
+	}
+	if err := scom.ValidateIDs("instance", instanceIDs...); err != nil {
+		return nil, err
+	}
+
+	switch path {
+	case "classes":
+		return scom.SearchClasses(ctx, d.db, search)
+
+	case "groups":
+		return scom.SearchGroups(ctx, d.db, search)
+
+	case "instances":
+		return scom.SearchInstances(ctx, d.db.Operational, scom.InstanceFilter{
+			ClassID: classID,
+			GroupID: groupID,
+			Search:  search,
+		})
+
+	case "counter-objects", "counter-names", "counters":
+		// Performance counters are almost never collected on the top-level
+		// instance itself, but on the objects it hosts (disks, SQL DB
+		// engines, processes, ...), so the pickers search a hosting-expanded
+		// sample of the selection — see scom.DB.CounterPickerScope.
+		scope, err := d.db.CounterPickerScope(ctx, classID, groupID, instanceIDs)
 		if err != nil {
 			return nil, err
 		}
-		instanceIDs = resolved
+		switch path {
+		case "counter-objects":
+			return scom.SearchCounterObjects(ctx, d.db, scope, search)
+		case "counter-names":
+			return scom.SearchCounterNames(ctx, d.db, scope, q.Get("object"), search)
+		default:
+			return scom.SearchCounterInstances(ctx, d.db, scope, q.Get("object"), q.Get("counterName"), search)
+		}
+
+	case "properties":
+		if classID == "" {
+			return []scom.Option{}, nil
+		}
+		return scom.ListPropertyNames(ctx, d.db, classID)
+
+	case "resolution-states":
+		return d.db.ResolutionStates(ctx)
+
+	case "variable-values":
+		// A dashboard variable's values: every class, every group, or the
+		// instances of a class or group (text = name, value = id).
+		switch q.Get("type") {
+		case "classes":
+			return d.db.ClassOptions(ctx)
+		case "groups":
+			return d.db.GroupOptions(ctx)
+		case "instances":
+			return d.db.InstanceOptions(ctx, classID, groupID)
+		default:
+			return nil, scom.BadRequestf("unknown variable type %q", q.Get("type"))
+		}
+
+	default:
+		return nil, &unknownResourceError{path: path}
 	}
-	if len(instanceIDs) == 0 {
-		return nil, nil
-	}
-	// A whole class/group, or a large explicit selection, is compared via its
-	// first few instances only — see scom.CounterPickerSampleSize.
-	instanceIDs = scom.SampleCounterScopeIDs(instanceIDs)
-	return scom.ExpandHostedEntityIDs(ctx, d.db.Operational, instanceIDs)
 }
 
 func sendJSONError(sender backend.CallResourceResponseSender, status int, err error) error {

@@ -50,8 +50,10 @@ func SearchInstances(ctx context.Context, db *sql.DB, f InstanceFilter) ([]Optio
 	joins, joinArgs := scopeJoins(f.ClassID, f.GroupID)
 	args := append([]any{sql.Named("search", searchLikePattern(f.Search))}, joinArgs...)
 
+	// DISTINCT: a group can relate to the same member more than once, which
+	// would otherwise list it twice.
 	query := fmt.Sprintf(`
-SELECT TOP %d
+SELECT DISTINCT TOP %d
 	CONVERT(varchar(64), bme.BaseManagedEntityId) AS Id,
 	bme.DisplayName
 FROM dbo.BaseManagedEntity bme%s
@@ -59,21 +61,7 @@ WHERE bme.IsDeleted = 0
 	AND bme.DisplayName LIKE @search ESCAPE '\'
 ORDER BY bme.DisplayName`, defaultSearchLimit, joins)
 
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []Option
-	for rows.Next() {
-		var opt Option
-		if err := rows.Scan(&opt.Value, &opt.Label); err != nil {
-			return nil, err
-		}
-		out = append(out, opt)
-	}
-	return out, rows.Err()
+	return runOptionsQuery(ctx, db, query, args)
 }
 
 // ResolveInstanceIDs returns every instance id in scope for a class and/or
@@ -88,25 +76,61 @@ func ResolveInstanceIDs(ctx context.Context, db *sql.DB, classID, groupID string
 		return nil, nil
 	}
 
-	joins, joinArgs := scopeJoins(classID, groupID)
-	query := `
-SELECT CONVERT(varchar(64), bme.BaseManagedEntityId)
-FROM dbo.BaseManagedEntity bme` + joins + `
-WHERE bme.IsDeleted = 0`
+	query, args := resolveInstanceIDsQuery(classID, groupID)
+	return queryStrings(ctx, db, query, args)
+}
 
-	rows, err := db.QueryContext(ctx, query, joinArgs...)
+// resolveInstanceIDsQuery is ResolveInstanceIDs' query. DISTINCT because a
+// group can relate to the same member through more than one relationship.
+func resolveInstanceIDsQuery(classID, groupID string) (string, []any) {
+	joins, args := scopeJoins(classID, groupID)
+	return `
+SELECT DISTINCT CONVERT(varchar(64), bme.BaseManagedEntityId)
+FROM dbo.BaseManagedEntity bme` + joins + `
+WHERE bme.IsDeleted = 0`, args
+}
+
+// variableValuesLimit caps how many instances a dashboard variable lists. A
+// dropdown with more than this isn't usable, and the cap keeps one variable
+// from pulling a whole huge class into the browser.
+const variableValuesLimit = 10_000
+
+// topScopeInstancesQuery lists the first limit instances in a class/group
+// scope by display name: the counter pickers' sample (see
+// CounterPickerSampleSize) and dashboard variable values. Sorted so the same
+// scope always gives the same instances. limit is a constant, never input.
+func topScopeInstancesQuery(classID, groupID string, limit int) (string, []any) {
+	joins, args := scopeJoins(classID, groupID)
+	return fmt.Sprintf(`
+SELECT TOP (%d) CONVERT(varchar(64), x.BaseManagedEntityId) AS Id, x.DisplayName
+FROM (
+	SELECT DISTINCT bme.BaseManagedEntityId, bme.DisplayName
+	FROM dbo.BaseManagedEntity bme%s
+	WHERE bme.IsDeleted = 0
+) x
+ORDER BY x.DisplayName, x.BaseManagedEntityId`, limit, joins), args
+}
+
+// ListInstances returns up to variableValuesLimit instances in a class/group
+// scope, for a dashboard variable.
+func ListInstances(ctx context.Context, db *sql.DB, classID, groupID string) ([]Option, error) {
+	if classID == "" && groupID == "" {
+		return []Option{}, nil
+	}
+	query, args := topScopeInstancesQuery(classID, groupID, variableValuesLimit)
+	return runOptionsQuery(ctx, db, query, args)
+}
+
+// sampleInstanceIDs returns the first n instance ids in a class/group scope.
+func sampleInstanceIDs(ctx context.Context, db *sql.DB, classID, groupID string, n int) ([]string, error) {
+	query, args := topScopeInstancesQuery(classID, groupID, n)
+	opts, err := runOptionsQuery(ctx, db, query, args)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
+	ids := make([]string, len(opts))
+	for i, o := range opts {
+		ids[i] = o.Value
 	}
-	return ids, rows.Err()
+	return ids, nil
 }

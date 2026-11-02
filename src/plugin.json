@@ -4,6 +4,7 @@
   "name": "SCOM",
   "id": "scom-datasource",
   "metrics": true,
+  "annotations": true,
   "backend": true,
   "executable": "gpx_scom",
   "info": {

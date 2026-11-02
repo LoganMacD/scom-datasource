@@ -66,3 +66,45 @@ func TestHealthTreeInstanceID(t *testing.T) {
 		})
 	}
 }
+
+// The timeline mode returns only the timeline, never the current/history frames.
+func TestHealthModeTimeline(t *testing.T) {
+	if HealthModeTimeline.includesCurrent() || HealthModeTimeline.includesHistory() {
+		t.Error("timeline mode also runs current/history, want neither")
+	}
+}
+
+func TestQueryModelValidate(t *testing.T) {
+	valid := "6f3d5b8a-1c2e-4a7b-9d10-ab12cd34ef56"
+	cases := []struct {
+		name    string
+		qm      QueryModel
+		wantErr bool
+	}{
+		{"empty query", QueryModel{}, false},
+		{"valid ids", QueryModel{Class: &ResourceRef{Value: valid}, Instances: []ResourceRef{{Value: valid}}}, false},
+		{"unresolved variable as instance", QueryModel{Instances: []ResourceRef{{Value: "$server"}}}, true},
+		{"bad group id", QueryModel{Group: &ResourceRef{Value: "not-a-guid"}}, true},
+		{"unknown statistic", QueryModel{Statistic: "median"}, true},
+		{"known statistic", QueryModel{Statistic: StatisticMax}, false},
+		{"unknown alert time filter", QueryModel{AlertTimeFilter: "sometimes"}, true},
+		{"known alert time filter", QueryModel{AlertTimeFilter: AlertTimeActive}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.qm.validate()
+			if c.wantErr != (err != nil) {
+				t.Fatalf("validate() = %v, wantErr %v", err, c.wantErr)
+			}
+			if err != nil && !IsBadRequest(err) {
+				t.Errorf("got %T, want a bad request error", err)
+			}
+		})
+	}
+}
+
+func TestHealthTreeInstanceIDIsBadRequest(t *testing.T) {
+	if _, err := healthTreeInstanceID(nil); !IsBadRequest(err) {
+		t.Errorf("got %v, want a bad request error", err)
+	}
+}

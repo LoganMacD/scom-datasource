@@ -18,24 +18,20 @@ func ExpandHostedEntityIDs(ctx context.Context, db *sql.DB, ids []string) ([]str
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	query, args := expandHostedEntityIDsQuery(ids)
+	return queryStrings(ctx, db, query, args)
+}
 
-	query, inArgs := expandHostedEntityIDsQuery(ids)
-
-	rows, err := db.QueryContext(ctx, query, inArgs...)
-	if err != nil {
-		return nil, err
+// ExpandScopeIDs resolves a class and/or group to its instances and widens
+// them to everything they host or contain, in one batch. It returns the same
+// ids as ResolveInstanceIDs followed by ExpandHostedEntityIDs, without
+// sending the (possibly large) instance list to the plugin and back.
+func ExpandScopeIDs(ctx context.Context, db *sql.DB, classID, groupID string) ([]string, error) {
+	if classID == "" && groupID == "" {
+		return nil, nil
 	}
-	defer func() { _ = rows.Close() }()
-
-	var out []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
+	query, args := expandScopeIDsQuery(classID, groupID)
+	return queryStrings(ctx, db, query, args)
 }
 
 func expandHostedEntityIDsQuery(ids []string) (string, []any) {
@@ -50,11 +46,31 @@ func expandHostedEntityIDsQuery(ids []string) (string, []any) {
 	if rootSetupSQL == "" {
 		rootSetupSQL = "CREATE TABLE #RootIds (Id uniqueidentifier PRIMARY KEY);\n"
 	}
+	return rootSetupSQL + hostingExpansionSQL, rootArgs
+}
 
-	// Use iterative frontier expansion in temp tables instead of a recursive
-	// CTE: for some customer environments, SQL Server can fail to compile the
-	// recursive shape with "query processor ran out of internal resources".
-	query := rootSetupSQL + `
+// expandScopeIDsQuery seeds #RootIds straight from the class/group scope
+// (see scopeJoins) instead of from a bound id list. DISTINCT because a group
+// can relate to the same member through more than one relationship.
+func expandScopeIDsQuery(classID, groupID string) (string, []any) {
+	joins, args := scopeJoins(classID, groupID)
+	seed := `
+CREATE TABLE #RootIds (Id uniqueidentifier PRIMARY KEY);
+INSERT INTO #RootIds (Id)
+SELECT DISTINCT bme.BaseManagedEntityId
+FROM dbo.BaseManagedEntity bme` + joins + `
+WHERE bme.IsDeleted = 0;
+`
+	return seed + hostingExpansionSQL, args
+}
+
+// hostingExpansionSQL widens #RootIds (which the caller creates and fills)
+// to everything it hosts or contains, and selects the result.
+//
+// It uses iterative frontier expansion in temp tables instead of a recursive
+// CTE: for some customer environments, SQL Server can fail to compile the
+// recursive shape with "query processor ran out of internal resources".
+const hostingExpansionSQL = `
 CREATE TABLE #HostingTypes (RelationshipTypeGuid uniqueidentifier PRIMARY KEY);
 INSERT INTO #HostingTypes (RelationshipTypeGuid)
 SELECT RelationshipTypeGuid
@@ -105,5 +121,21 @@ END;
 SELECT CONVERT(varchar(64), Id) AS Id
 FROM #Visited;`
 
-	return query, rootArgs
+// queryStrings runs a query whose result is a single string column.
+func queryStrings(ctx context.Context, db *sql.DB, query string, args []any) ([]string, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := []string{}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }

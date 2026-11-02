@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/grafana/grafana-plugin-sdk-go v0.297.0
 	github.com/microsoft/go-mssqldb v1.10.0
+	golang.org/x/sync v0.23.0
 )
 
 require (

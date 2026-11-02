@@ -117,3 +117,82 @@ func TestHealthTreeDrilldownLink(t *testing.T) {
 		}
 	})
 }
+
+// Health history resolves each state name with its own OUTER APPLY: a plain
+// LEFT JOIN to dbo.MonitorOperationalState fans out when a monitor maps
+// several names onto one health state, listing a transition more than once.
+func TestBuildHealthHistoryQueryDoesNotFanOut(t *testing.T) {
+	query, _ := buildHealthHistoryQuery([]string{"inst-1"}, time.Time{}, time.Time{})
+	if strings.Contains(query, "JOIN dbo.MonitorOperationalState") {
+		t.Errorf("query joins dbo.MonitorOperationalState directly\nfull query:\n%s", query)
+	}
+	for _, want := range []string{
+		"WHERE mosi.MonitorId = s.MonitorId AND mosi.HealthState = sce.OldHealthState",
+		") mosOld",
+		"WHERE mosi.MonitorId = s.MonitorId AND mosi.HealthState = sce.NewHealthState",
+		") mosNew",
+		"sce.NewHealthState AS NewHealthStateCode",
+	} {
+		if !strings.Contains(query, want) {
+			t.Errorf("query missing %q\nfull query:\n%s", want, query)
+		}
+	}
+}
+
+func TestBuildHealthTimelineQuery(t *testing.T) {
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	query, args := buildHealthTimelineQuery([]string{"inst-1"}, from, to)
+
+	for _, want := range []string{
+		// Starting state: last change before the range, else the old state of
+		// the first change after it, else the current state.
+		"COALESCE(lastBefore.NewHealthState, firstAfter.OldHealthState, s.HealthState)",
+		"WHERE sceb.StateId = s.StateId AND sceb.TimeGenerated < @from",
+		"WHERE scea.StateId = s.StateId AND scea.TimeGenerated >= @from",
+		"UNION ALL",
+		"AND sce.TimeGenerated >= @from AND sce.TimeGenerated <= @to",
+		"AND s.MonitorId = dbo.fn_ManagedTypeId_SystemHealthEntityState()",
+		"WHERE s.BaseManagedEntityId IN (SELECT Id FROM #HealthScope)",
+		"ORDER BY ManagedEntity, ManagedEntityId, TimeGenerated, Kind",
+	} {
+		if !strings.Contains(query, want) {
+			t.Errorf("query missing %q\nfull query:\n%s", want, query)
+		}
+	}
+	if len(args) != 3 { // from, to, idScopeValues
+		t.Fatalf("got %d args, want 3", len(args))
+	}
+}
+
+func TestHealthTimelineFrames(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows := []healthTimelineRow{
+		{EntityID: "a", Entity: "alpha", Time: t0, State: 1},
+		{EntityID: "a", Entity: "alpha", Time: t0.Add(time.Hour), State: 3},
+		{EntityID: "b", Entity: "bravo", Time: t0, State: 1},
+	}
+	end := t0.Add(2 * time.Hour)
+	frames := healthTimelineFrames(rows, end)
+	if len(frames) != 2 {
+		t.Fatalf("got %d frames, want one per entity", len(frames))
+	}
+
+	alpha := frames[0]
+	if alpha.Name != "alpha" || alpha.Rows() != 3 {
+		t.Fatalf("got frame %q with %d rows, want alpha with start, change and end", alpha.Name, alpha.Rows())
+	}
+	// The last state is carried to the end of the range.
+	if got := alpha.Fields[0].At(2).(time.Time); !got.Equal(end) {
+		t.Errorf("last point at %v, want %v", got, end)
+	}
+	if got := alpha.Fields[1].At(2).(int64); got != 3 {
+		t.Errorf("last state %d, want 3 (Critical) carried to the end", got)
+	}
+	if alpha.Fields[1].Config == nil || len(alpha.Fields[1].Config.Mappings) == 0 {
+		t.Error("timeline states have no value mappings, so they'd show as bare numbers")
+	}
+	if alpha.Fields[1].Labels["entityId"] != "a" {
+		t.Errorf("got labels %v, want the entity id", alpha.Fields[1].Labels)
+	}
+}

@@ -3,6 +3,7 @@ package scom
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 
 	mssql "github.com/microsoft/go-mssqldb"
@@ -19,6 +20,24 @@ const defaultSearchLimit = 50
 // matching sql.Named args for a variable-length list of values. Used so IN
 // filters stay parameterized instead of string-concatenated.
 func inClause(prefix string, values []string) (string, []any) {
+	if len(values) == 0 {
+		return "", nil
+	}
+
+	placeholders := make([]string, len(values))
+	args := make([]any, len(values))
+	for i, v := range values {
+		name := fmt.Sprintf("%s%d", prefix, i)
+		placeholders[i] = "@" + name
+		args[i] = sql.Named(name, v)
+	}
+
+	return "(" + strings.Join(placeholders, ", ") + ")", args
+}
+
+// int64InClause is inClause for integer values (e.g. DW row ids), bound as
+// integers so SQL Server compares them without converting the column.
+func int64InClause(prefix string, values []int64) (string, []any) {
 	if len(values) == 0 {
 		return "", nil
 	}
@@ -117,23 +136,24 @@ OUTER APPLY (
 }
 
 // monitorOperationalStateApply resolves a monitor's operator-facing state
-// name for one health state, aliased "mos" so healthStateCase can read
-// mos.MonitorOperationalStateName off it.
+// name for one health state, under alias, so healthStateCase can read
+// <alias>.MonitorOperationalStateName off it. A query that needs two (health
+// history's old and new state) uses two aliases.
 //
-// An OUTER APPLY ... TOP 1 rather than the plain LEFT JOIN this replaced:
-// nothing makes (MonitorId, HealthState) unique in
-// dbo.MonitorOperationalState — a monitor may map several named operational
-// states onto one health state — so a join on that pair fans out and
-// multiplies whatever row it's attached to. Microsoft's own dbo.StateView
-// joins it exactly that way and papers over the result with SELECT DISTINCT.
-func monitorOperationalStateApply(monitorIDColumn, healthStateColumn string) string {
+// An OUTER APPLY ... TOP 1 rather than a plain LEFT JOIN: nothing makes
+// (MonitorId, HealthState) unique in dbo.MonitorOperationalState — a monitor
+// may map several named operational states onto one health state — so a
+// join on that pair fans out and multiplies whatever row it's attached to.
+// Microsoft's own dbo.StateView joins it exactly that way and papers over
+// the result with SELECT DISTINCT.
+func monitorOperationalStateApply(alias, monitorIDColumn, healthStateColumn string) string {
 	return fmt.Sprintf(`
 OUTER APPLY (
 	SELECT TOP 1 mosi.MonitorOperationalStateName
 	FROM dbo.MonitorOperationalState mosi
 	WHERE mosi.MonitorId = %s AND mosi.HealthState = %s
 	ORDER BY mosi.MonitorOperationalStateName
-) mos`, monitorIDColumn, healthStateColumn)
+) %s`, monitorIDColumn, healthStateColumn, alias)
 }
 
 // idScopeParamName is the fixed name of the single string parameter
@@ -172,16 +192,33 @@ const idScopeParamName = "idScopeValues"
 // guards against a PRIMARY KEY violation if the same id appears twice in
 // values. Returns ("", nil) when values is empty.
 func idScopeTempTable(tableName string, values []string) (string, []any) {
+	return scopeTempTable(tableName, "uniqueidentifier", idScopeParamName, values)
+}
+
+// intScopeTempTable is idScopeTempTable for integer ids (Data Warehouse row
+// ids). paramName must be unique within the batch, so one batch can load
+// several of these.
+func intScopeTempTable(tableName, paramName string, values []int64) (string, []any) {
+	strs := make([]string, len(values))
+	for i, v := range values {
+		strs[i] = strconv.FormatInt(v, 10)
+	}
+	return scopeTempTable(tableName, "int", paramName, strs)
+}
+
+// scopeTempTable is the shared body of idScopeTempTable/intScopeTempTable.
+// columnType is a fixed SQL type name, never user input.
+func scopeTempTable(tableName, columnType, paramName string, values []string) (string, []any) {
 	if len(values) == 0 {
 		return "", nil
 	}
 
 	query := fmt.Sprintf(`
-CREATE TABLE %s (Id uniqueidentifier PRIMARY KEY);
+CREATE TABLE %s (Id %s PRIMARY KEY);
 INSERT INTO %s (Id)
-SELECT DISTINCT CONVERT(uniqueidentifier, value)
+SELECT DISTINCT CONVERT(%s, value)
 FROM STRING_SPLIT(@%s, ',');
-`, tableName, tableName, idScopeParamName)
+`, tableName, columnType, tableName, columnType, paramName)
 
-	return query, []any{sql.Named(idScopeParamName, mssql.VarCharMax(strings.Join(values, ",")))}
+	return query, []any{sql.Named(paramName, mssql.VarCharMax(strings.Join(values, ",")))}
 }

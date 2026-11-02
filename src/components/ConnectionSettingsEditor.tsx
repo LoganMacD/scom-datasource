@@ -13,7 +13,11 @@ interface Props {
   value: ConnectionOptions;
   password?: string;
   passwordConfigured?: boolean;
+  // Locks the server and credential fields (e.g. while they're shared from
+  // the Operational database). The database name stays editable.
   disabled?: boolean;
+  databasePlaceholder?: string;
+  databaseTooltip?: string;
   onChange: (value: ConnectionOptions) => void;
   onPasswordChange: (password: string) => void;
   onResetPassword: () => void;
@@ -25,6 +29,8 @@ export function ConnectionSettingsEditor({
   password,
   passwordConfigured,
   disabled,
+  databasePlaceholder = 'OperationsManager',
+  databaseTooltip,
   onChange,
   onPasswordChange,
   onResetPassword,
@@ -65,11 +71,11 @@ export function ConnectionSettingsEditor({
           onChange={(e: ChangeEvent<HTMLInputElement>) => set({ instanceName: e.target.value })}
         />
       </InlineField>
-      <InlineField label="Database" labelWidth={20} disabled={disabled}>
+      <InlineField label="Database" labelWidth={20} tooltip={databaseTooltip}>
         <Input
           id={`${idPrefix}-database`}
           value={value.database}
-          placeholder="OperationsManager"
+          placeholder={databasePlaceholder}
           width={40}
           onChange={(e: ChangeEvent<HTMLInputElement>) => set({ database: e.target.value })}
         />

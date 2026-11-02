@@ -65,3 +65,31 @@ func TestExpandHostedEntityIDsQuery(t *testing.T) {
 		}
 	})
 }
+
+// A class/group scope resolves and expands in one batch, seeding #RootIds
+// from the scope joins instead of from an id list the plugin sends back.
+func TestExpandScopeIDsQuery(t *testing.T) {
+	query, args := expandScopeIDsQuery("class-1", "group-1")
+
+	for _, want := range []string{
+		"CREATE TABLE #RootIds",
+		"INSERT INTO #RootIds (Id)\nSELECT DISTINCT bme.BaseManagedEntityId",
+		"dmt.BaseTypeId = @classId",
+		"rel.SourceEntityId = @groupId",
+		"WHERE bme.IsDeleted = 0;",
+		// Then the same frontier expansion as ExpandHostedEntityIDs.
+		"CREATE TABLE #HostingTypes",
+		"WHILE @Depth < @MaxDepth",
+		"FROM #Visited",
+	} {
+		if !strings.Contains(query, want) {
+			t.Errorf("query missing %q\nfull query:\n%s", want, query)
+		}
+	}
+	if strings.Contains(query, "STRING_SPLIT") {
+		t.Errorf("query should seed from the scope joins, not a bound id list\nfull query:\n%s", query)
+	}
+	if len(args) != 2 {
+		t.Fatalf("got %d args, want classId and groupId", len(args))
+	}
+}

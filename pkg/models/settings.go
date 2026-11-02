@@ -56,12 +56,26 @@ func LoadPluginSettings(source backend.DataSourceInstanceSettings) (*PluginSetti
 	settings.Secrets = loadSecretPluginSettings(source.DecryptedSecureJSONData)
 
 	if settings.WarehouseSameAsOperational {
+		// Same server and credentials as the Operational database, but the
+		// warehouse keeps its own database name: SCOM always keeps the two in
+		// separate databases, and copying the name too pointed every
+		// warehouse query at OperationsManager.
+		database := settings.Warehouse.Database
+		if database == "" {
+			database = DefaultWarehouseDatabase
+		}
 		settings.Warehouse = settings.Operational
+		settings.Warehouse.Database = database
 		settings.Secrets.WarehousePassword = settings.Secrets.OperationalPassword
 	}
 
 	return &settings, nil
 }
+
+// DefaultWarehouseDatabase is the Data Warehouse database name SCOM setup
+// uses, assumed when "same as operational database" is on and no warehouse
+// database name was saved.
+const DefaultWarehouseDatabase = "OperationsManagerDW"
 
 func loadSecretPluginSettings(source map[string]string) *SecretPluginSettings {
 	return &SecretPluginSettings{

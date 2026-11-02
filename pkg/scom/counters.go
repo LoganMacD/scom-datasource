@@ -54,60 +54,46 @@ func counterScopeClause(instanceIDs []string) (setupSQL, existsClause string, ar
 	return setupSQL, existsClause, args
 }
 
-// SearchCounterObjects backs the /counter-objects resource endpoint: the
-// first step of the Object -> Counter -> Instance picker. Returns distinct
-// performance object names (e.g. "Process", "Memory"), scoped to instanceIDs
-// like SearchCounterNames/SearchCounterInstances below.
-func SearchCounterObjects(ctx context.Context, db *sql.DB, instanceIDs []string, search string) ([]Option, error) {
-	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
-	args := append([]any{sql.Named("search", searchLikePattern(search))}, scopeArgs...)
-
-	query := setupSQL + fmt.Sprintf(`
-SELECT DISTINCT TOP %d
-	pr.ObjectName AS Id,
-	pr.ObjectName AS Label
+// counterObjectsQuery lists every performance object name (e.g. "Process",
+// "Memory") within the scope. The list is cached per scope and searched in
+// memory (see SearchCounterObjects), so typing in the picker doesn't rerun
+// the Perf.vPerfHourly scan behind the scope clause.
+func counterObjectsQuery(instanceIDs []string) (string, []any) {
+	setupSQL, scopeClause, args := counterScopeClause(instanceIDs)
+	return setupSQL + `
+SELECT DISTINCT pr.ObjectName AS Id, pr.ObjectName AS Label
 FROM dbo.vPerformanceRule pr
 INNER JOIN dbo.vPerformanceRuleInstance pri ON pri.RuleRowId = pr.RuleRowId
-WHERE pr.ObjectName LIKE @search ESCAPE '\'%s
-ORDER BY pr.ObjectName`, defaultSearchLimit, scopeClause)
-
-	return runOptionsQuery(ctx, db, query, args)
+WHERE 1 = 1` + scopeClause + `
+ORDER BY pr.ObjectName`, args
 }
 
-// SearchCounterNames backs the /counter-names resource endpoint: the second
-// picker step, scoped to a chosen object. Returns distinct counter names
-// (e.g. "Working Set", "% Processor Time") for that object.
-func SearchCounterNames(ctx context.Context, db *sql.DB, instanceIDs []string, object, search string) ([]Option, error) {
+// counterNamesQuery lists every counter name (e.g. "Working Set") of one
+// object within the scope. Cached and searched like counterObjectsQuery.
+func counterNamesQuery(instanceIDs []string, object string) (string, []any) {
 	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
-	args := append([]any{sql.Named("search", searchLikePattern(search)), sql.Named("object", object)}, scopeArgs...)
-
-	query := setupSQL + fmt.Sprintf(`
-SELECT DISTINCT TOP %d
-	pr.CounterName AS Id,
-	pr.CounterName AS Label
+	args := append([]any{sql.Named("object", object)}, scopeArgs...)
+	return setupSQL + `
+SELECT DISTINCT pr.CounterName AS Id, pr.CounterName AS Label
 FROM dbo.vPerformanceRule pr
 INNER JOIN dbo.vPerformanceRuleInstance pri ON pri.RuleRowId = pr.RuleRowId
-WHERE pr.ObjectName = @object AND pr.CounterName LIKE @search ESCAPE '\'%s
-ORDER BY pr.CounterName`, defaultSearchLimit, scopeClause)
-
-	return runOptionsQuery(ctx, db, query, args)
+WHERE pr.ObjectName = @object` + scopeClause + `
+ORDER BY pr.CounterName`, args
 }
 
-// SearchCounterInstances backs the /counters resource endpoint: the third
-// and final picker step, scoped to a chosen object + counter name. With
-// nothing picked here, an object/counter selection alone means "every
-// instance"; picking specific rows here narrows it down further. Returns the
-// DW's own PerformanceRuleInstanceRowId as the option value — performance.go
-// can then query Perf.vPerfHourly/Daily/Raw directly on that id.
-func SearchCounterInstances(ctx context.Context, db *sql.DB, instanceIDs []string, object, counterName, search string) ([]Option, error) {
+// counterInstancesQuery searches the counter instances (e.g. "C:", "_Total")
+// of one object + counter within the scope. Instance lists can be very long
+// (every process on every server), so this one searches in SQL and returns
+// at most defaultSearchLimit rows. The option value is the DW's own
+// PerformanceRuleInstanceRowId, which performance.go queries on directly.
+func counterInstancesQuery(instanceIDs []string, object, counterName, search string) (string, []any) {
 	setupSQL, scopeClause, scopeArgs := counterScopeClause(instanceIDs)
 	args := append([]any{
 		sql.Named("search", searchLikePattern(search)),
 		sql.Named("object", object),
 		sql.Named("counterName", counterName),
 	}, scopeArgs...)
-
-	query := setupSQL + fmt.Sprintf(`
+	return setupSQL + fmt.Sprintf(`
 SELECT TOP %d
 	CONVERT(varchar(20), pri.PerformanceRuleInstanceRowId) AS Id,
 	CASE WHEN pri.InstanceName IS NOT NULL AND pri.InstanceName <> ''
@@ -116,11 +102,60 @@ FROM dbo.vPerformanceRuleInstance pri
 INNER JOIN dbo.vPerformanceRule pr ON pri.RuleRowId = pr.RuleRowId
 WHERE pr.ObjectName = @object AND pr.CounterName = @counterName
 	AND pri.InstanceName LIKE @search ESCAPE '\'%s
-ORDER BY pri.InstanceName`, defaultSearchLimit, scopeClause)
-
-	return runOptionsQuery(ctx, db, query, args)
+ORDER BY pri.InstanceName`, defaultSearchLimit, scopeClause), args
 }
 
+// SearchCounterObjects backs the /counter-objects resource endpoint: the
+// first step of the Object -> Counter -> Instance picker.
+func SearchCounterObjects(ctx context.Context, db *DB, scope CounterScope, search string) ([]Option, error) {
+	if scope.Scoped && len(scope.IDs) == 0 {
+		return []Option{}, nil // the class/group has no instances
+	}
+	all, err := db.cache().options.get(ctx, cacheKey("counterObjects", scope.Key), metadataCacheTTL,
+		func(ctx context.Context) ([]Option, error) {
+			query, args := counterObjectsQuery(scope.IDs)
+			return runOptionsQuery(ctx, db.Warehouse, query, args)
+		})
+	if err != nil {
+		return nil, err
+	}
+	return searchOptions(all, search, defaultSearchLimit), nil
+}
+
+// SearchCounterNames backs the /counter-names resource endpoint: the second
+// picker step, scoped to a chosen object.
+func SearchCounterNames(ctx context.Context, db *DB, scope CounterScope, object, search string) ([]Option, error) {
+	if scope.Scoped && len(scope.IDs) == 0 {
+		return []Option{}, nil
+	}
+	all, err := db.cache().options.get(ctx, cacheKey("counterNames", scope.Key, object), metadataCacheTTL,
+		func(ctx context.Context) ([]Option, error) {
+			query, args := counterNamesQuery(scope.IDs, object)
+			return runOptionsQuery(ctx, db.Warehouse, query, args)
+		})
+	if err != nil {
+		return nil, err
+	}
+	return searchOptions(all, search, defaultSearchLimit), nil
+}
+
+// SearchCounterInstances backs the /counters resource endpoint: the third
+// and final picker step, scoped to a chosen object + counter name. With
+// nothing picked here, an object/counter selection alone means "every
+// instance"; picking specific rows here narrows it down further.
+func SearchCounterInstances(ctx context.Context, db *DB, scope CounterScope, object, counterName, search string) ([]Option, error) {
+	if scope.Scoped && len(scope.IDs) == 0 {
+		return []Option{}, nil
+	}
+	return db.cache().options.get(ctx, cacheKey("counterInstances", scope.Key, object, counterName, search), scopeCacheTTL,
+		func(ctx context.Context) ([]Option, error) {
+			query, args := counterInstancesQuery(scope.IDs, object, counterName, search)
+			return runOptionsQuery(ctx, db.Warehouse, query, args)
+		})
+}
+
+// runOptionsQuery runs a query returning (value, label) rows. It always
+// returns a non-nil slice so the result marshals as [] rather than null.
 func runOptionsQuery(ctx context.Context, db *sql.DB, query string, args []any) ([]Option, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -128,7 +163,7 @@ func runOptionsQuery(ctx context.Context, db *sql.DB, query string, args []any) 
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []Option
+	out := []Option{}
 	for rows.Next() {
 		var opt Option
 		if err := rows.Scan(&opt.Value, &opt.Label); err != nil {

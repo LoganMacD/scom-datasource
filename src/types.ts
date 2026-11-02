@@ -44,24 +44,35 @@ export interface MySecureJsonData {
 
 export type SCOMQueryType = 'performance' | 'alerts' | 'health' | 'properties' | 'health-tree';
 
-export type ClassSearchBy = 'name' | 'displayName';
-
 // 'auto' picks raw/hourly/daily per request from the time range, the panel's
 // point budget and the warehouse's retention — see choosePerfGrain in
 // pkg/scom/perfgrain.go. An unset aggregation (queries saved before 'auto'
 // existed, or without the default) has always run as 'raw' and still does.
 export type Aggregation = 'auto' | 'raw' | 'hourly' | 'daily';
 
-// Which frames a Health query returns. Left unset, the backend treats it the
-// same as 'both' — see HealthMode in pkg/scom/query.go.
-export type HealthMode = 'current' | 'history' | 'both';
+// Which hourly/daily statistic a performance query plots. Left unset, the
+// backend plots the average, as it always did — see Statistic in
+// pkg/scom/performance.go. Raw data is single samples, so it ignores this.
+export type Statistic = 'average' | 'min' | 'max';
+
+// What a Health query returns. Left unset, the backend treats it the same as
+// 'both' — see HealthMode in pkg/scom/query.go. 'timeline' returns each
+// entity's state over the time range, for a State timeline panel.
+export type HealthMode = 'current' | 'history' | 'both' | 'timeline';
 
 // Which database an Alerts query reads from. Left unset, the backend treats
 // it the same as 'operational' — see AlertSource in pkg/scom/query.go. The
 // warehouse keeps alert history far longer than the Operational database,
-// at the cost of the Owner field and an approximated last-modified time —
-// see QueryAlertsWarehouse in pkg/scom/alerts.go.
+// at the cost of the Owner field, an approximated last-modified time, and
+// only supporting the 'raised' time filter — see QueryAlertsWarehouse in
+// pkg/scom/alerts.go.
 export type AlertSource = 'operational' | 'warehouse';
+
+// How an Alerts query uses the time range. Left unset, the backend treats it
+// the same as 'raised' — see AlertTimeFilter in pkg/scom/alerts.go.
+// 'active' finds alerts open at any point in the range, so an alert raised
+// yesterday that's still open shows on a "last hour" dashboard.
+export type AlertTimeFilter = 'raised' | 'active' | 'ignore';
 
 export interface ResourceRef {
   value: string;
@@ -92,6 +103,7 @@ export interface MyQuery extends DataQuery {
   counterName?: ResourceRef;
   counters?: ResourceRef[];
   aggregation?: Aggregation;
+  statistic?: Statistic;
   // Overrides the default series legend ("Object - Counter [Instance]
   // (Entity)"), which reads every field there is and gets unwieldy fast.
   // Supports {{object}}, {{counter}}, {{instance}}, {{entity}} macros; empty
@@ -108,6 +120,7 @@ export interface MyQuery extends DataQuery {
   severityFilter?: number[];
   resolutionStateFilter?: number[];
   alertSource?: AlertSource;
+  alertTimeFilter?: AlertTimeFilter;
   propertyNames?: string[];
   healthMode?: HealthMode;
   // Prunes a health tree query down to monitors that are themselves
@@ -115,6 +128,11 @@ export interface MyQuery extends DataQuery {
   // filterUnhealthyBranches in pkg/scom/healthtree.go. Ignored by every
   // other query type.
   unhealthyOnly?: boolean;
+  // Colors health states, alert severities and priorities, and shows
+  // maintenance mode as Yes/No, via value mappings — see colors.go. On for
+  // new queries (DEFAULT_QUERY); unset on older ones, which stay uncolored
+  // because a data source's mappings take priority over a panel's own.
+  stateColors?: boolean;
 }
 
 export const DEFAULT_QUERY: Partial<MyQuery> = {
@@ -125,7 +143,19 @@ export const DEFAULT_QUERY: Partial<MyQuery> = {
   // every alert in the management group, so this keeps a fresh query cheap
   // by default — broaden it by clearing the resolution state filter.
   resolutionStateFilter: [0],
+  stateColors: true,
 };
+
+// What a dashboard variable lists: every class, every group, or the
+// instances of one class or group. Each value's text is the name and its
+// value the SCOM id, which is what the query editor's pickers store.
+export type VariableQueryType = 'classes' | 'groups' | 'instances';
+
+export interface SCOMVariableQuery extends DataQuery {
+  type?: VariableQueryType;
+  class?: ResourceRef;
+  group?: ResourceRef;
+}
 
 // Severity is a fixed 3-value SCOM enum, unlike resolution state (see
 // AlertFilters.tsx), which administrators can extend — so only this one is

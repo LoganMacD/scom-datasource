@@ -4,90 +4,78 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
-// classesQueryByName lists non-abstract SCOM classes (ManagedTypes) whose
-// technical name contains the search text (e.g. "Microsoft.Windows.Computer")
-// anywhere, not just as a prefix — see searchLikePattern.
-var classesQueryByName = fmt.Sprintf(`
-SELECT TOP %d
-	CONVERT(varchar(64), ManagedTypeId) AS Id,
-	TypeName
-FROM dbo.ManagedType
-WHERE IsAbstract = 0
-	AND TypeName LIKE @search ESCAPE '\'
-ORDER BY TypeName`, defaultSearchLimit)
-
-// classesQueryByDisplayName searches classes by their localized display name
-// (e.g. "Agent") instead of the technical TypeName. The canonical join for
-// that name is dbo.LocalizedText on LTStringId = ManagedTypeId with
-// LTStringType 1; LocalizedText.ElementName is not it.
+// classListQuery lists every non-abstract SCOM class (ManagedType) with its
+// technical name (TypeName, e.g. "Microsoft.Windows.Computer") and display
+// name (e.g. "Windows Computer"). The list is cached and searched in memory
+// (see SearchClasses), so one search box can match either name.
 //
-// This used to go through dbo.ManagedTypeView with LanguageCode pinned to
-// 'ENU'. The view adds only a ManagementPack ContentReadable filter
-// (replicated below) and that same LocalizedText join, unrestricted — so it
-// yields one row per installed language pack, and pinning the language was
-// how this query collapsed them. The cost was that a class localized into
-// another language, or carrying no display string at all, was silently
-// unsearchable by name. localizedNameApply picks a name by preference
-// instead, falling back to the technical TypeName so every non-abstract
-// class is findable here.
-var classesQueryByDisplayName = fmt.Sprintf(`
-SELECT TOP %d
+// The display name comes from dbo.LocalizedText on LTStringId =
+// ManagedTypeId with LTStringType 1 (LocalizedText.ElementName is not it),
+// resolved by language preference with localizedNameApply rather than by
+// pinning one LanguageCode, which used to hide classes localized into any
+// other language or carrying no display string at all. A class with no
+// display string falls back to its TypeName.
+//
+// Every non-abstract class is listed, as the old by-name search did; the
+// ManagementPack ContentReadable filter only ever applied to the
+// display-name search.
+var classListQuery = fmt.Sprintf(`
+SELECT
 	CONVERT(varchar(64), mt.ManagedTypeId) AS Id,
+	mt.TypeName,
 	%s AS DisplayName
-FROM dbo.ManagedType mt
-INNER JOIN dbo.ManagementPack mp ON mp.ManagementPackId = mt.ManagementPackId
-	AND mp.ContentReadable = 1%s
+FROM dbo.ManagedType mt%s
 WHERE mt.IsAbstract = 0
-	AND %s LIKE @search ESCAPE '\'
-ORDER BY %s`,
-	defaultSearchLimit,
+ORDER BY DisplayName, mt.TypeName`,
 	classDisplayName,
-	localizedNameApply("mt.ManagedTypeId", "disp"),
-	classDisplayName,
-	classDisplayName)
+	localizedNameApply("mt.ManagedTypeId", "disp"))
 
-// classDisplayName is the display name expression classesQueryByDisplayName
-// selects, filters and orders by — spelled once so the three can't drift
-// apart (a SELECT alias can't be reused in a WHERE clause).
+// classDisplayName is the display name expression classListQuery selects.
 const classDisplayName = "ISNULL(disp.LTValue, mt.TypeName)"
 
-// SearchBy selects which class field SearchClasses matches the search text
-// against.
-type SearchBy string
-
-const (
-	SearchByName        SearchBy = "name"
-	SearchByDisplayName SearchBy = "displayName"
-)
-
-// classesQueryFor picks which of the two static class-search queries to run.
-// Split out from SearchClasses so the SearchBy->query mapping is directly
-// testable without a live DB — see classes_test.go.
-func classesQueryFor(by SearchBy) string {
-	if by == SearchByDisplayName {
-		return classesQueryByDisplayName
-	}
-	return classesQueryByName
-}
-
-// SearchClasses backs the /classes resource endpoint used by the query
-// editor's class picker.
-func SearchClasses(ctx context.Context, db *sql.DB, search string, by SearchBy) ([]Option, error) {
-	rows, err := db.QueryContext(ctx, classesQueryFor(by), sql.Named("search", searchLikePattern(search)))
+// loadClassOptions runs classListQuery. Each option is labelled with the
+// display name and, when it differs, carries the technical name as its
+// description, which also tells apart classes that share a display name.
+func loadClassOptions(ctx context.Context, db *sql.DB) ([]Option, error) {
+	rows, err := db.QueryContext(ctx, classListQuery)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []Option
+	out := []Option{}
 	for rows.Next() {
-		var opt Option
-		if err := rows.Scan(&opt.Value, &opt.Label); err != nil {
+		var id, typeName, displayName string
+		if err := rows.Scan(&id, &typeName, &displayName); err != nil {
 			return nil, err
+		}
+		opt := Option{Value: id, Label: displayName}
+		if !strings.EqualFold(typeName, displayName) {
+			opt.Description = typeName
 		}
 		out = append(out, opt)
 	}
 	return out, rows.Err()
+}
+
+// ClassOptions returns every non-abstract class, cached for
+// metadataCacheTTL.
+func (db *DB) ClassOptions(ctx context.Context) ([]Option, error) {
+	return db.cache().options.get(ctx, "classes", metadataCacheTTL, func(ctx context.Context) ([]Option, error) {
+		return loadClassOptions(ctx, db.Operational)
+	})
+}
+
+// SearchClasses backs the /classes resource endpoint used by the query
+// editor's class picker. It matches the search text against both the
+// display name and the technical name (see searchOptions).
+func SearchClasses(ctx context.Context, db *DB, search string) ([]Option, error) {
+	classes, err := db.ClassOptions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return searchOptions(classes, search, defaultSearchLimit), nil
 }

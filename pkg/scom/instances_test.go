@@ -59,3 +59,31 @@ func TestScopeJoins(t *testing.T) {
 		}
 	})
 }
+
+// A group can relate to the same member through more than one relationship.
+func TestResolveInstanceIDsQueryIsDistinct(t *testing.T) {
+	query, args := resolveInstanceIDsQuery("", "group-1")
+	if !strings.Contains(query, "SELECT DISTINCT CONVERT(varchar(64), bme.BaseManagedEntityId)") {
+		t.Errorf("query should return each instance once\nfull query:\n%s", query)
+	}
+	if len(args) != 1 {
+		t.Errorf("got %d args, want 1", len(args))
+	}
+}
+
+// The counter pickers' sample and variable values take a stable, sorted
+// slice of the scope in SQL, rather than fetching the whole class first.
+func TestTopScopeInstancesQuery(t *testing.T) {
+	query, _ := topScopeInstancesQuery("class-1", "", CounterPickerSampleSize)
+	for _, want := range []string{
+		"SELECT TOP (10) CONVERT(varchar(64), x.BaseManagedEntityId) AS Id, x.DisplayName",
+		"SELECT DISTINCT bme.BaseManagedEntityId, bme.DisplayName",
+		"dmt.BaseTypeId = @classId",
+		"WHERE bme.IsDeleted = 0",
+		"ORDER BY x.DisplayName, x.BaseManagedEntityId",
+	} {
+		if !strings.Contains(query, want) {
+			t.Errorf("query missing %q\nfull query:\n%s", want, query)
+		}
+	}
+}

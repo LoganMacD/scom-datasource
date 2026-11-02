@@ -1,8 +1,10 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback } from 'react';
 import { SelectableValue } from '@grafana/data';
 import { Combobox, ComboboxOption, InlineField, RadioButtonGroup } from '@grafana/ui';
-import { DataSource } from '../datasource';
-import { ClassSearchBy, ResourceRef } from '../types';
+import type { DataSource } from '../datasource';
+import { variableOptions } from '../templating';
+import { ResourceRef } from '../types';
+import { useLoadError } from './useLoadError';
 
 interface Props {
   datasource: DataSource;
@@ -17,22 +19,21 @@ const SCOPE_OPTIONS: Array<SelectableValue<'class' | 'group'>> = [
   { label: 'Group', value: 'group' },
 ];
 
-const CLASS_SEARCH_BY_OPTIONS: Array<SelectableValue<ClassSearchBy>> = [
-  { label: 'Name', value: 'name' },
-  { label: 'Display name', value: 'displayName' },
-];
-
 export function ClassGroupPicker({ datasource, scope, value, onScopeChange, onChange }: Props) {
-  const [classSearchBy, setClassSearchBy] = useState<ClassSearchBy>('name');
+  const { error, track } = useLoadError();
 
+  // One search box: a class matches on its display name ("Windows Computer")
+  // or its technical name ("Microsoft.Windows.Computer"), which is shown
+  // underneath. Dashboard variables are offered first.
   const loadOptions = useCallback(
     async (search: string): Promise<ComboboxOption[]> => {
-      const results = await (scope === 'class'
-        ? datasource.searchClasses(search, classSearchBy)
-        : datasource.searchGroups(search));
-      return results.map((r) => ({ label: r.label, value: r.value }));
+      const results = await track(scope === 'class' ? datasource.searchClasses(search) : datasource.searchGroups(search));
+      return [
+        ...variableOptions(search),
+        ...results.map((r) => ({ label: r.label, value: r.value, description: r.description })),
+      ];
     },
-    [datasource, scope, classSearchBy]
+    [datasource, scope, track]
   );
 
   return (
@@ -47,21 +48,20 @@ export function ClassGroupPicker({ datasource, scope, value, onScopeChange, onCh
           }}
         />
       </InlineField>
-      {scope === 'class' && (
-        <InlineField label="Match on" labelWidth={14}>
-          <RadioButtonGroup
-            options={CLASS_SEARCH_BY_OPTIONS}
-            value={classSearchBy}
-            onChange={(v) => {
-              setClassSearchBy(v ?? 'name');
-              onChange(undefined);
-            }}
-          />
-        </InlineField>
-      )}
-      <InlineField label={scope === 'class' ? 'Class' : 'Group'} labelWidth={14} grow>
+      <InlineField
+        label={scope === 'class' ? 'Class' : 'Group'}
+        labelWidth={14}
+        grow
+        invalid={!!error}
+        error={error}
+        tooltip={
+          scope === 'class'
+            ? 'Search by display name (e.g. Windows Computer) or technical name (e.g. Microsoft.Windows.Computer). Use * and ? as wildcards.'
+            : 'Use * and ? as wildcards.'
+        }
+      >
         <Combobox
-          key={`${scope}:${classSearchBy}`}
+          key={scope}
           options={loadOptions}
           value={value ? { label: value.label, value: value.value } : null}
           placeholder={`Search ${scope === 'class' ? 'classes' : 'groups'}...`}

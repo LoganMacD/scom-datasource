@@ -78,7 +78,7 @@ ORDER BY bme.DisplayName, %s`,
 		displayName,
 		healthStateCase("mos", "s.HealthState"),
 		localizedNameApply("m.MonitorId", "disp"),
-		monitorOperationalStateApply("s.MonitorId", "s.HealthState"),
+		monitorOperationalStateApply("mos", "s.MonitorId", "s.HealthState"),
 		healthTreeScopeTempTable,
 		displayName)
 	return query, args

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 )
 
@@ -106,6 +107,33 @@ func loadPerfRetention(ctx context.Context, db *sql.DB) (map[Aggregation]perfRet
 		out[agg] = perfRetention{MaxDataAgeDays: maxAge, IntervalMinutes: int(interval.Int64), LastGrooming: lastGroom}
 	}
 	return out, rows.Err()
+}
+
+// retentionResult is a cached loadPerfRetention outcome. A failed read is
+// cached too (for failedRetentionCacheTTL), so a missing permission doesn't
+// cost a failing query on every performance query.
+type retentionResult struct {
+	retention map[Aggregation]perfRetention
+	err       error
+}
+
+// perfRetention returns the warehouse's retention settings, cached for
+// metadataCacheTTL. A cancelled request is never cached as a failure.
+func (db *DB) perfRetention(ctx context.Context) (map[Aggregation]perfRetention, error) {
+	res, err := db.cache().retention.get(ctx, "perf", metadataCacheTTL, func(ctx context.Context) (retentionResult, error) {
+		retention, err := loadPerfRetention(ctx, db.Warehouse)
+		if err != nil && (isContextError(err) || ctx.Err() != nil) {
+			return retentionResult{}, err
+		}
+		if err != nil {
+			log.DefaultLogger.FromContext(ctx).Warn("SCOM performance: could not read DW retention metadata", "error", err)
+		}
+		return retentionResult{retention: retention, err: err}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.retention, res.err
 }
 
 // normalizeBaseTableName lowercases a base table name and drops any schema
