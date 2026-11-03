@@ -125,14 +125,22 @@ const localizedNamePreference = `CASE lt.LanguageCode WHEN 'ENU' THEN 0 WHEN 'EN
 // pair it with ISNULL(<alias>.LTValue, <the element's internal name>) to
 // cover the no-display-string case, which is what the SCOM console shows
 // there too.
-func localizedNameApply(idColumn, alias string) string {
+//
+// Language preference alone can still pick a useless string: a blank one
+// (ISNULL wouldn't fall back from it, so the label came out empty), or one
+// that just repeats the internal name (internalNameColumn), which some
+// authoring tools write into a language pack the author never filled in. Blank
+// strings are skipped and internal-name copies only win when no language has
+// anything better, so a real display name in any language is preferred.
+func localizedNameApply(idColumn, internalNameColumn, alias string) string {
 	return fmt.Sprintf(`
 OUTER APPLY (
 	SELECT TOP 1 lt.LTValue
 	FROM dbo.LocalizedText lt
 	WHERE lt.LTStringId = %s AND lt.LTStringType = %d
-	ORDER BY %s
-) %s`, idColumn, localizedTextDisplayName, localizedNamePreference, alias)
+		AND lt.LTValue <> N''
+	ORDER BY CASE WHEN lt.LTValue = %s THEN 1 ELSE 0 END, %s
+) %s`, idColumn, localizedTextDisplayName, internalNameColumn, localizedNamePreference, alias)
 }
 
 // monitorOperationalStateApply resolves a monitor's operator-facing state

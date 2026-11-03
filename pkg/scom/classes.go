@@ -31,7 +31,7 @@ FROM dbo.ManagedType mt%s
 WHERE mt.IsAbstract = 0
 ORDER BY DisplayName, mt.TypeName`,
 	classDisplayName,
-	localizedNameApply("mt.ManagedTypeId", "disp"))
+	localizedNameApply("mt.ManagedTypeId", "mt.TypeName", "disp"))
 
 // classDisplayName is the display name expression classListQuery selects.
 const classDisplayName = "ISNULL(disp.LTValue, mt.TypeName)"

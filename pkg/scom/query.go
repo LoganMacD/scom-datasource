@@ -75,8 +75,8 @@ type QueryModel struct {
 	HealthMode      HealthMode      `json:"healthMode"`
 	// UnhealthyOnly prunes a health tree query's result down to monitors that
 	// are themselves Warning/Critical, plus their ancestor chain up to the
-	// root — see filterUnhealthyBranches in healthtree.go. Ignored by every
-	// other query type.
+	// root — see healthTree.keep in healthtree.go. Ignored by every other
+	// query type.
 	UnhealthyOnly bool `json:"unhealthyOnly"`
 	// StateColors adds value mappings that color health states, alert
 	// severities and priorities, and show maintenance mode as Yes/No — see
@@ -223,14 +223,14 @@ func Run(ctx context.Context, db *DB, qm QueryModel, from, to time.Time, datasou
 	case QueryTypeHealthTree:
 		// A health tree query scoped to a group with no instances narrowed
 		// down is rooted at the group itself — a SCOM group is itself a
-		// managed entity with its own health rollup — with every member's
-		// monitor tree hanging underneath, rather than requiring the user to
-		// pick one specific member out of the group. The members have to be
-		// resolved and passed down explicitly: a group entity's own dbo.State
-		// rows are just the five standard System.Health rollups, so a tree
-		// built from the group alone comes back the same three nodes
-		// regardless of what the group contains. This must be checked before
-		// the general instance-scope resolution below, which would flatten the
+		// managed entity — with its members underneath, rather than requiring
+		// the user to pick one specific member out of the group. Members sit
+		// under the group's rollup monitors where SCOM rolls their health up,
+		// and directly under the group otherwise (see newHealthTree). They're
+		// resolved and passed down explicitly because a group needn't have
+		// any rollup monitors: its own health is then Not Monitored and says
+		// nothing about what it contains. This must be checked before the
+		// general instance-scope resolution below, which would flatten the
 		// group into its members and lose the group as the root, tripping
 		// healthTreeInstanceID's "exactly one instance" check on the way.
 		if len(instanceIDs) == 0 && groupID != "" {

@@ -64,7 +64,14 @@ Newer query options (all unset = old behaviour): `statistic` (`average|min|max` 
 - **`PerformanceRuleInstanceRowId` is not entity-specific.** It's keyed on (rule, instance name) and shared by every entity. Always also filter by entity on the fact row (the scope applies to explicitly picked counters too), and split series per entity.
 - **Counter pickers sample** the first `CounterPickerSampleSize` (10) instances by display name (`TOP` in SQL, so the sample is stable). Query execution never samples.
 - **Perf aggregation**: `auto` (the default for new queries) picks a single stored grain per request in `choosePerfGrain` (`pkg/scom/perfgrain.go`), using live DW retention (`dbo.StandardDatasetAggregation.MaxDataAgeDays`, matched by storage base table name) and Grafana's MaxDataPoints/Interval. Explicit `raw`/`hourly`/`daily` are never overridden. An unset aggregation means `raw` (legacy). Never stitch grains together.
-- **Health tree** requires exactly one instance, or a group with no instances (rooted at the group, with members underneath).
+- **Health tree** requires exactly one instance, or a group with no instances (rooted at the group). It's shaped like Health Explorer (`newHealthTree`):
+  - Within an object, monitors hang under `ParentMonitorId`.
+  - A dependency (rollup) monitor (`dbo.Monitor.IsDependencyMonitor`) gets the `MemberMonitorId` of every object related to it as the relationship's **source**, through its `RelationshipTypeId` or any subtype (`dbo.RelationshipType.BaseRelationshipTypeId` closure). That's how a group's members, and a computer's OS and disks, appear. Only nodes reachable from the root's Entity Health are shown.
+  - Group members no rollup reaches hang directly under the group root, with an info notice. The root is always shown, even when Not Monitored (a group with no rollup monitors), so nothing floats loose: Node Graph treats every parentless node as another root and only draws 200 nodes from the roots.
+  - Not Monitored monitors are dropped unless something monitored sits beneath them. `unhealthyOnly` keeps Warning/Critical monitors plus every node up to the root.
+  - Capped at `healthTreeMaxObjects` objects (worst health admitted first, level by level) and `healthTreeMaxNodes` nodes (breadth first), with a warning notice when cut.
+  - Labels: where the tree enters an object (root, rollup member, hung member) the title is the object's name and the subtitle the monitor's display name; elsewhere it's the other way round.
+  - The rollup walk (direction, subtype matching) hasn't been checked against a live Operational DB yet.
 - **Backward compatibility**: new `QueryModel` fields must make the zero value / unset mean the old behaviour, because saved dashboards don't have the field. Existing examples: `HealthMode` "" means both, `AlertSource` "" means operational, `LegendFormat` "" means the default label, `Statistic` "" means average, `AlertTimeFilter` "" means raised, `StateColors` false means uncolored.
 - **Perf series order** is by legend (then ids), so legends and Grafana's position-based colors don't shuffle between refreshes.
 
@@ -83,7 +90,7 @@ Newer query options (all unset = old behaviour): `statistic` (`average|min|max` 
 - **Perf fact queries read ids, time and value only** (`buildPerformanceQuery`), filter on the fact view's own columns (`#EntityRows`/`#CounterRows` row-id temp tables), and have no `ORDER BY`; names come from one follow-up lookup per series (`buildPerformanceSeriesQuery`, two result sets). Don't join names back onto fact rows.
 - Warehouse alerts put the in-range alerts in `#AlertRows` first and compute the latest resolution state for those only.
 - Temp table names are fixed constants (`#EntityScope`, `#CounterScope`, `#HealthTreeScope`, ...). That's safe because they're connection-scoped.
-- **Display names**: use `localizedNameApply` (OUTER APPLY TOP 1 with language preference ENU → ENA → any) plus `ISNULL(alias.LTValue, <internal name>)`. Never filter `LocalizedText` to one language, and avoid SCOM's `*View` wrappers that fan out per language.
+- **Display names**: use `localizedNameApply(idColumn, internalNameColumn, alias)` (OUTER APPLY TOP 1 that skips blank strings, prefers strings that aren't just the internal name, then language ENU → ENA → any) plus `ISNULL(alias.LTValue, <internal name>)`. Never filter `LocalizedText` to one language, and avoid SCOM's `*View` wrappers that fan out per language.
 - `monitorOperationalStateApply` instead of joining `dbo.MonitorOperationalState` (it isn't unique per monitor/health state).
 - Free-text search: `searchLikePattern(search)` together with `LIKE @search ESCAPE '\'` (contains-match; users can type `*`/`?` wildcards). Cap results with `defaultSearchLimit`.
 - `sessionInitSQL` (ANSI_NULLS, ARITHABORT, ...) runs on every connection so SCOM's indexed views get used. Don't remove it.

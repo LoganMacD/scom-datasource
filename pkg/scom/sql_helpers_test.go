@@ -153,6 +153,29 @@ func TestIntScopeTempTable(t *testing.T) {
 	}
 }
 
+// A blank display string, or one that only repeats the element's internal
+// name, used to win whenever it sat in the preferred language, hiding a real
+// display name in another language pack (or, for a blank one, showing no
+// name at all).
+func TestLocalizedNameApply(t *testing.T) {
+	got := localizedNameApply("m.MonitorId", "m.MonitorName", "disp")
+	for _, want := range []string{
+		"OUTER APPLY (",
+		"SELECT TOP 1 lt.LTValue",
+		"WHERE lt.LTStringId = m.MonitorId AND lt.LTStringType = 1",
+		"AND lt.LTValue <> N''",
+		"ORDER BY CASE WHEN lt.LTValue = m.MonitorName THEN 1 ELSE 0 END, " + localizedNamePreference,
+		") disp",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("apply missing %q\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "LanguageCode = '") {
+		t.Errorf("apply filters on a single LanguageCode, want a preference order\n%s", got)
+	}
+}
+
 func TestMonitorOperationalStateApplyAlias(t *testing.T) {
 	got := monitorOperationalStateApply("mosNew", "s.MonitorId", "sce.NewHealthState")
 	for _, want := range []string{
