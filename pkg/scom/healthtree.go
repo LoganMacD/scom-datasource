@@ -13,11 +13,13 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 )
 
-// Health tree size limits. Grafana's Node Graph draws 200 nodes at a time but
-// lays out every node it's sent, so a tree spanning a big group (every
-// member, and everything their rollups reach) has to stop somewhere. The
-// query keeps the top of the hierarchy and, level by level, the worst-health
-// objects first; the nodes frame carries a notice whenever anything is cut.
+// Health tree size limits. A tree spanning a big group (every member, and
+// everything their rollups reach) has to stop somewhere, and Grafana's Node
+// Graph can't lay out more than a couple of hundred nodes well. The query
+// keeps the top of the hierarchy and, level by level, the worst-health objects
+// first; the frames then trim detail from the bottom of the tree until it fits
+// (see healthTreeDetail). The nodes frame carries a notice whenever anything
+// is hidden or cut.
 const (
 	// healthTreeMaxObjects caps how many objects one tree pulls in: the root,
 	// a group's members and everything their rollup monitors reach.
@@ -26,8 +28,14 @@ const (
 	// object cap already bounds the work; this only stops a pathological
 	// chain early.
 	healthTreeMaxDepth = 20
-	// healthTreeMaxNodes caps how many monitors one tree returns.
-	healthTreeMaxNodes = 2000
+	// healthTreeLayoutNodes is how many nodes Node Graph shows before it hides
+	// the rest behind "+N" markers, while still laying all of them out, which
+	// spreads the graph thin. A bigger tree loses detail until it fits.
+	healthTreeLayoutNodes = 200
+	// healthTreeMaxNodes caps how many nodes one tree returns once it's down
+	// to objects only. Node Graph warns that its layered layout gets slow
+	// past 500.
+	healthTreeMaxNodes = 500
 )
 
 // healthTreeMembersTempTable holds a group tree's members. A group can have
@@ -173,7 +181,8 @@ IF EXISTS (SELECT 1 FROM #HealthTreeFrontier) SET @Truncated = 1;
 
 // healthTreeSelectSQL returns buildHealthTreeQuery's three result sets: every
 // monitor's state on every object in the tree, the rollup links between them,
-// and whether the object cap cut the tree short.
+// and whether the object cap cut the tree short. Each monitor comes with its
+// target class's internal and display names for readableMonitorName.
 //
 // Goes to dbo.Monitor rather than SCOM's dbo.MonitorView wrapper. The view
 // adds exactly two things over the base table: a ManagementPack
@@ -194,14 +203,18 @@ SELECT
 	%[2]s AS HealthStateName,
 	s.LastModified,
 	ISNULL(mm.IsInMaintenanceMode, 0) AS InMaintenanceMode,
-	bme.DisplayName AS EntityDisplayName
+	bme.DisplayName AS EntityDisplayName,
+	mt.TypeName AS TargetClassName,
+	ctd.LTValue AS TargetClassDisplayName,
+	m.IsUnitMonitor
 FROM #HealthTreeEntities te
 INNER JOIN dbo.State s ON s.BaseManagedEntityId = te.Id
 INNER JOIN dbo.Monitor m ON m.MonitorId = s.MonitorId
 INNER JOIN dbo.ManagementPack mp ON mp.ManagementPackId = m.ManagementPackId
 	AND mp.ContentReadable = 1
 INNER JOIN dbo.BaseManagedEntity bme ON bme.BaseManagedEntityId = s.BaseManagedEntityId%[3]s%[4]s
-LEFT JOIN dbo.MaintenanceMode mm ON mm.BaseManagedEntityId = s.BaseManagedEntityId;
+LEFT JOIN dbo.MaintenanceMode mm ON mm.BaseManagedEntityId = s.BaseManagedEntityId
+LEFT JOIN dbo.ManagedType mt ON mt.ManagedTypeId = m.TargetManagedEntityType%[5]s;
 
 SELECT
 	CONVERT(varchar(64), l.SourceEntityId) AS SourceEntityId,
@@ -215,7 +228,8 @@ SELECT @Truncated AS Truncated;`,
 	healthTreeDisplayName,
 	healthStateCase("mos", "s.HealthState"),
 	localizedNameApply("m.MonitorId", "m.MonitorName", "disp"),
-	monitorOperationalStateApply("mos", "s.MonitorId", "s.HealthState"))
+	monitorOperationalStateApply("mos", "s.MonitorId", "s.HealthState"),
+	localizedNameApply("mt.ManagedTypeId", "mt.TypeName", "ctd"))
 
 // buildHealthTreeQuery builds the query+args for QueryHealthTree. Kept
 // separate from execution so the generated SQL can be asserted against in
@@ -252,6 +266,47 @@ type healthTreeMonitorRow struct {
 	LastModified      time.Time
 	InMaintenance     bool
 	EntityDisplayName string
+	// The monitor's target class: its internal name (e.g.
+	// "UINameSpace922c….Group") and display name, either of which can be
+	// missing. Only readableMonitorName reads them.
+	TargetClassName        sql.NullString
+	TargetClassDisplayName sql.NullString
+	// IsUnitMonitor marks an individual monitor, as opposed to an aggregate
+	// or rollup one. A big tree hides these first (see healthTreeDetail).
+	IsUnitMonitor bool
+}
+
+// readableMonitorName returns a row's monitor display name with its target
+// class's internal name swapped for something readable. Tools that create
+// group rollup monitors often build the display name from the group class's
+// internal name rather than its display name, giving names like
+// "UINameSpace922c….Group Availability Dependency Monitor". Those get the
+// class's display name instead (the object's own name when the class has
+// none), and that's then dropped from the front when it only repeats the
+// object's name, which the node already shows: "Availability Dependency
+// Monitor". A name that doesn't contain its class's internal name is left
+// alone, so ordinary display names never change.
+func readableMonitorName(r healthTreeMonitorRow) string {
+	className := r.TargetClassName.String
+	if className == "" || !strings.Contains(r.DisplayName, className) {
+		return r.DisplayName
+	}
+	classDisplay := r.TargetClassDisplayName.String
+	if classDisplay == "" || classDisplay == className {
+		classDisplay = r.EntityDisplayName
+	}
+	name := strings.Join(strings.Fields(strings.ReplaceAll(r.DisplayName, className, classDisplay)), " ")
+	if object := strings.Join(strings.Fields(r.EntityDisplayName), " "); object != "" {
+		if rest, ok := strings.CutPrefix(name, object+" "); ok {
+			if rest = strings.TrimLeft(rest, "-–—:,. "); rest != "" {
+				name = rest
+			}
+		}
+	}
+	if name == "" {
+		return r.DisplayName
+	}
+	return name
 }
 
 // healthTreeLink is one row of buildHealthTreeQuery's second result set: the
@@ -308,6 +363,11 @@ type healthTree struct {
 // newHealthTree links up the query's rows. rootID is the tree's root object
 // and memberIDs a group root's members (see buildHealthTreeQuery).
 func newHealthTree(rows []healthTreeMonitorRow, links []healthTreeLink, rootID string, memberIDs []string) *healthTree {
+	rows = slices.Clone(rows)
+	for i := range rows {
+		rows[i].DisplayName = readableMonitorName(rows[i])
+	}
+
 	t := &healthTree{
 		rows:     rows,
 		index:    make(map[string]int, len(rows)),
@@ -382,8 +442,8 @@ func newHealthTree(rows []healthTreeMonitorRow, links []healthTreeLink, rootID s
 		}
 	}
 
-	for id := range t.children {
-		t.sortChildren(id)
+	for id, kids := range t.children {
+		t.sortUnder(t.row(id).EntityID, kids)
 	}
 	return t
 }
@@ -423,12 +483,11 @@ func (t *healthTree) markReachable(start string, reached map[string]bool) {
 	}
 }
 
-// sortChildren orders a node's children so the frames come out the same on
-// every refresh: the node's own object's monitors first, then other objects',
-// each by name.
-func (t *healthTree) sortChildren(parent string) {
-	entity := t.row(parent).EntityID
-	slices.SortFunc(t.children[parent], func(a, b string) int {
+// sortUnder orders the nodes beneath a node of the given object so the frames
+// come out the same on every refresh: that object's own monitors first, then
+// other objects', each by name.
+func (t *healthTree) sortUnder(entity string, ids []string) {
+	slices.SortFunc(ids, func(a, b string) int {
 		ra, rb := t.row(a), t.row(b)
 		return cmp.Or(
 			boolCompare(ra.EntityID != entity, rb.EntityID != entity),
@@ -487,23 +546,90 @@ func (t *healthTree) keep(unhealthyOnly bool) map[string]bool {
 	return keep
 }
 
-// order lists the kept nodes breadth first from the root, so the frame starts
-// at the root and a tree cut at healthTreeMaxNodes keeps its upper levels.
-func (t *healthTree) order(keep map[string]bool) []string {
-	if !keep[t.root] {
-		return nil
+// healthTreeDetail is how much of a tree is shown. A tree too big for Node
+// Graph to lay out well (more than healthTreeLayoutNodes nodes) loses detail
+// from the bottom up until it fits: individual monitors first, then
+// everything but the objects. Nodes where the tree enters an object stay at
+// every level, so no object ever drops out.
+type healthTreeDetail int
+
+const (
+	healthTreeAllMonitors healthTreeDetail = iota
+	// healthTreeNoIndividualMonitors hides unit monitors, keeping the
+	// aggregate and rollup monitors that show how health rolls up.
+	healthTreeNoIndividualMonitors
+	// healthTreeObjectsOnly leaves one node per object (per health aspect a
+	// rollup reaches it through), linked straight to the object above.
+	healthTreeObjectsOnly
+)
+
+// shows reports whether a node is drawn at this level of detail.
+func (t *healthTree) shows(id string, detail healthTreeDetail) bool {
+	switch {
+	case t.entries[id] || detail == healthTreeAllMonitors:
+		return true
+	case detail == healthTreeNoIndividualMonitors:
+		return !t.row(id).IsUnitMonitor
+	default:
+		return false
 	}
-	out := []string{t.root}
-	seen := map[string]bool{t.root: true}
-	for i := 0; i < len(out); i++ {
-		for _, c := range t.children[out[i]] {
-			if keep[c] && !seen[c] {
-				seen[c] = true
-				out = append(out, c)
+}
+
+// shownChildren lists the nodes drawn directly beneath id: its kept
+// children that are shown and, in place of each hidden one, whatever is
+// shown beneath that. memo holds every list worked out so far.
+func (t *healthTree) shownChildren(id string, keep map[string]bool, detail healthTreeDetail, memo map[string][]string) []string {
+	if kids, ok := memo[id]; ok {
+		return kids
+	}
+	memo[id] = nil // a rollup cycle back to id finds nothing more below it
+	var out []string
+	seen := map[string]bool{}
+	for _, c := range t.children[id] {
+		if !keep[c] {
+			continue
+		}
+		below := []string{c}
+		if !t.shows(c, detail) {
+			below = t.shownChildren(c, keep, detail, memo)
+		}
+		for _, n := range below {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
 			}
 		}
 	}
+	t.sortUnder(t.row(id).EntityID, out)
+	memo[id] = out
 	return out
+}
+
+// layout picks the most detailed view of the kept nodes that fits in
+// healthTreeLayoutNodes, or objects only if none does. It returns that view's
+// nodes breadth first from the root (so the frame starts at the root, and a
+// tree cut at healthTreeMaxNodes keeps its upper levels) and the nodes shown
+// beneath each.
+func (t *healthTree) layout(keep map[string]bool) (healthTreeDetail, []string, map[string][]string) {
+	for detail := healthTreeAllMonitors; ; detail++ {
+		children := map[string][]string{}
+		var order []string
+		if keep[t.root] {
+			order = []string{t.root}
+			seen := map[string]bool{t.root: true}
+			for i := 0; i < len(order); i++ {
+				for _, c := range t.shownChildren(order[i], keep, detail, children) {
+					if !seen[c] {
+						seen[c] = true
+						order = append(order, c)
+					}
+				}
+			}
+		}
+		if len(order) <= healthTreeLayoutNodes || detail == healthTreeObjectsOnly {
+			return detail, order, children
+		}
+	}
 }
 
 // healthTreeFrames builds the Node Graph "nodes"/"edges" frame pair from the
@@ -520,7 +646,7 @@ func (t *healthTree) order(keep map[string]bool) []string {
 func healthTreeFrames(rows []healthTreeMonitorRow, links []healthTreeLink, rootID string, memberIDs []string, unhealthyOnly, truncated bool) []*data.Frame {
 	t := newHealthTree(rows, links, rootID, memberIDs)
 
-	order := t.order(t.keep(unhealthyOnly))
+	detail, order, children := t.layout(t.keep(unhealthyOnly))
 	if len(order) > healthTreeMaxNodes {
 		order = order[:healthTreeMaxNodes]
 		truncated = true
@@ -608,6 +734,19 @@ func healthTreeFrames(rows []healthTreeMonitorRow, links []healthTreeLink, rootI
 		arcField("arc__notmonitored", arcNotMonitored, "gray"),
 	).SetMeta(&data.FrameMeta{PreferredVisualization: data.VisTypeNodeGraph})
 
+	if detail != healthTreeAllMonitors {
+		text := "Individual monitors are hidden because this tree is too big to lay out well."
+		if detail == healthTreeObjectsOnly {
+			text = "Only objects are shown, not their monitors, because this tree is too big to lay out well."
+		}
+		switch {
+		case !unhealthyOnly:
+			text += " Turn on Unhealthy only to see more."
+		case len(memberIDs) > 0:
+			text += " Pick a single instance to see more."
+		}
+		addNotice(nodesFrame, data.Notice{Severity: data.NoticeSeverityInfo, Text: text})
+	}
 	if truncated {
 		text := "This health tree is too large to show in full, so part of it is left out."
 		if !unhealthyOnly {
@@ -627,7 +766,7 @@ func healthTreeFrames(rows []healthTreeMonitorRow, links []healthTreeLink, rootI
 	// reach), so an edge's id is its source and target together.
 	var edgeIDs, sources, targets []string
 	for _, id := range order {
-		for _, c := range t.children[id] {
+		for _, c := range children[id] {
 			if !shown[c] {
 				continue
 			}
@@ -673,7 +812,8 @@ func QueryHealthTree(ctx context.Context, db *sql.DB, rootID string, memberIDs [
 		var maint sql.NullBool
 
 		if err := rows.Scan(&r.EntityID, &r.MonitorID, &r.ParentMonitorID, &r.DisplayName, &r.Category,
-			&r.HealthState, &r.HealthStateName, &r.LastModified, &maint, &r.EntityDisplayName); err != nil {
+			&r.HealthState, &r.HealthStateName, &r.LastModified, &maint, &r.EntityDisplayName,
+			&r.TargetClassName, &r.TargetClassDisplayName, &r.IsUnitMonitor); err != nil {
 			return nil, err
 		}
 		r.InMaintenance = maint.Bool

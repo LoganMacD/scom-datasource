@@ -39,6 +39,13 @@ func TestBuildHealthTreeQuery(t *testing.T) {
 		// back on every row to build a unique node id.
 		"CONVERT(varchar(64), s.BaseManagedEntityId) AS EntityId",
 		"bme.DisplayName AS EntityDisplayName",
+		// Each monitor's target class, for readableMonitorName.
+		"mt.TypeName AS TargetClassName",
+		"ctd.LTValue AS TargetClassDisplayName",
+		"LEFT JOIN dbo.ManagedType mt ON mt.ManagedTypeId = m.TargetManagedEntityType",
+		"WHERE lt.LTStringId = mt.ManagedTypeId AND lt.LTStringType = 1",
+		// Big trees hide individual monitors first.
+		"m.IsUnitMonitor\nFROM #HealthTreeEntities te",
 
 		// The tree follows rollup (dependency) monitors into the objects
 		// they roll up, the way Health Explorer does: through the monitor's
@@ -310,6 +317,62 @@ func TestHealthTreeFramesFollowsRollups(t *testing.T) {
 	}
 }
 
+// Tools that create group rollup monitors often name them after the group
+// class's internal name. The first cases are names from a real deployment,
+// which the tree used to show as they are.
+func TestReadableMonitorName(t *testing.T) {
+	const groupClass = "UINameSpace922c620551d444eb8d21b0afe823a011.Group"
+	cases := []struct {
+		name, displayName, className, classDisplay, object, want string
+	}{
+		{"group rollup named after its class", groupClass + " Availability Dependency Monitor", groupClass, "CAF - ALV Server", "CAF - ALV Server", "Availability Dependency Monitor"},
+		{"class with no display name", groupClass + " Availability Dependency Monitor", groupClass, "", "CAF - ALV Server", "Availability Dependency Monitor"},
+		{"class display name that is its internal name", groupClass + " Availability Dependency Monitor", groupClass, groupClass, "CAF - ALV Server", "Availability Dependency Monitor"},
+		{"separator left behind", groupClass + " - Availability", groupClass, "CAF - ALV Server", "CAF - ALV Server", "Availability"},
+		{"class named at the end", "Availability rollup for Contoso.WebApp", "Contoso.WebApp", "Contoso Web Application", "web01", "Availability rollup for Contoso Web Application"},
+		{"class named at the end, with no display name", "Availability rollup for Contoso.WebApp", "Contoso.WebApp", "", "web01", "Availability rollup for web01"},
+		{"class that isn't the object", "Contoso.WebApp Availability Rollup", "Contoso.WebApp", "Contoso Web Application", "web01", "Contoso Web Application Availability Rollup"},
+		{"name that is only the class", "Contoso.WebApp", "Contoso.WebApp", "Contoso Web Application", "web01", "Contoso Web Application"},
+		{"ordinary display name", "Logical Disk Free Space", "Microsoft.Windows.Server.10.0.LogicalDisk", "Windows Logical Disk", "C:", "Logical Disk Free Space"},
+		{"no class", "Logical Disk Free Space", "", "", "C:", "Logical Disk Free Space"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := healthTreeMonitorRow{DisplayName: c.displayName, EntityDisplayName: c.object}
+			if c.className != "" {
+				r.TargetClassName = sql.NullString{String: c.className, Valid: true}
+			}
+			if c.classDisplay != "" {
+				r.TargetClassDisplayName = sql.NullString{String: c.classDisplay, Valid: true}
+			}
+			if got := readableMonitorName(r); got != c.want {
+				t.Errorf("readableMonitorName(%q) = %q, want %q", c.displayName, got, c.want)
+			}
+		})
+	}
+}
+
+func TestHealthTreeFramesReadableGeneratedNames(t *testing.T) {
+	const groupClass = "UINameSpace922c620551d444eb8d21b0afe823a011.Group"
+	rollup := monitorRow("g", "rollup", "avail", groupClass+" Availability Dependency Monitor", 3, "CAF - ALV Server")
+	rollup.TargetClassName = sql.NullString{String: groupClass, Valid: true}
+	rollup.TargetClassDisplayName = sql.NullString{String: "CAF - ALV Server", Valid: true}
+	rows := []healthTreeMonitorRow{
+		monitorRow("g", "health", "", "Entity Health", 3, "CAF - ALV Server"),
+		monitorRow("g", "avail", "health", "Availability", 3, "CAF - ALV Server"),
+		rollup,
+	}
+
+	v := viewHealthTree(t, healthTreeFrames(rows, nil, "g", nil, false, false))
+	v.assertLabel(t, "g:rollup", "Availability Dependency Monitor", "CAF - ALV Server")
+	if got := v.details["g:rollup"]["Monitor"]; got != "Availability Dependency Monitor" {
+		t.Errorf("Monitor detail = %q, want the readable name", got)
+	}
+	if rows[2].DisplayName != groupClass+" Availability Dependency Monitor" {
+		t.Error("healthTreeFrames changed the caller's rows")
+	}
+}
+
 func TestHealthTreeFramesArcs(t *testing.T) {
 	rows := []healthTreeMonitorRow{
 		monitorRow("e1", "health", "", "Entity Health", 3, "server01"),
@@ -546,17 +609,96 @@ func TestHealthTreeFramesRollupCycle(t *testing.T) {
 	v.assertNodes(t, "a:health", "a:rollup", "b:health", "b:rollup")
 }
 
-func TestHealthTreeFramesTruncation(t *testing.T) {
-	t.Run("a tree over the node cap keeps its top and says so", func(t *testing.T) {
-		rows := []healthTreeMonitorRow{monitorRow("e1", "health", "", "Entity Health", 1, "server01")}
-		for i := 0; i < healthTreeMaxNodes+10; i++ {
-			rows = append(rows, monitorRow("e1", fmt.Sprintf("m%05d", i), "health", fmt.Sprintf("Monitor %05d", i), 1, "server01"))
+// unitMonitor marks a test row as an individual (unit) monitor.
+func unitMonitor(r healthTreeMonitorRow) healthTreeMonitorRow {
+	r.IsUnitMonitor = true
+	return r
+}
+
+// A tree bigger than Node Graph lays out well loses detail from the bottom up
+// until it fits: individual monitors first, then everything but the objects.
+func TestHealthTreeFramesTrimsBigTrees(t *testing.T) {
+	t.Run("individual monitors go first", func(t *testing.T) {
+		rows := []healthTreeMonitorRow{
+			monitorRow("c", "health", "", "Entity Health", 3, "server01"),
+			monitorRow("c", "avail", "health", "Availability", 3, "server01"),
+			monitorRow("c", "osRollup", "avail", "Operating System Availability Rollup", 3, "server01"),
+			// The OS rolls up through one of its individual monitors, which
+			// is where the tree enters the OS, so that one stays.
+			monitorRow("os", "health", "", "Entity Health", 3, "Windows Server 2019"),
+			monitorRow("os", "avail", "health", "Availability", 3, "Windows Server 2019"),
+			unitMonitor(monitorRow("os", "service", "avail", "Windows Update Service", 3, "Windows Server 2019")),
 		}
-		v := viewHealthTree(t, healthTreeFrames(rows, nil, "e1", nil, false, false))
+		for i := 0; i < healthTreeLayoutNodes; i++ {
+			rows = append(rows, unitMonitor(monitorRow("c", fmt.Sprintf("unit%03d", i), "avail", fmt.Sprintf("Unit %03d", i), 3, "server01")))
+		}
+		links := []healthTreeLink{{SourceEntityID: "c", MonitorID: "osRollup", TargetEntityID: "os", MemberMonitorID: "service"}}
+
+		v := viewHealthTree(t, healthTreeFrames(rows, links, "c", nil, false, false))
+		v.assertNodes(t, "c:health", "c:avail", "c:osRollup", "os:service")
+		v.assertConnected(t)
+		v.assertParents(t, "os:service", "c:osRollup")
+		if got := noticeTexts(v.notices); !strings.Contains(got, "Individual monitors are hidden") || !strings.Contains(got, "Turn on Unhealthy only") {
+			t.Errorf("notices = %q, want one saying individual monitors are hidden", got)
+		}
+
+		// Already unhealthy only, on a single object: nothing more to suggest.
+		v = viewHealthTree(t, healthTreeFrames(rows, links, "c", nil, true, false))
+		v.assertNodes(t, "c:health", "c:avail", "c:osRollup", "os:service")
+		if got := noticeTexts(v.notices); strings.Contains(got, "Unhealthy only") || strings.Contains(got, "single instance") {
+			t.Errorf("notices = %q, want no suggestion it can't act on", got)
+		}
+	})
+
+	t.Run("then everything but the objects", func(t *testing.T) {
+		rows := []healthTreeMonitorRow{
+			monitorRow("g", "health", "", "Entity Health", 3, "All Servers"),
+			monitorRow("g", "avail", "health", "Availability", 3, "All Servers"),
+			monitorRow("g", "rollup", "avail", "Availability Dependency Monitor", 3, "All Servers"),
+		}
+		var links []healthTreeLink
+		var members []string
+		for i := 0; i < healthTreeLayoutNodes; i++ {
+			m := fmt.Sprintf("m%03d", i)
+			members = append(members, m)
+			rows = append(rows,
+				monitorRow(m, "health", "", "Entity Health", 3, "server-"+m),
+				monitorRow(m, "avail", "health", "Availability", 3, "server-"+m),
+				unitMonitor(monitorRow(m, "heartbeat", "avail", "Heartbeat", 3, "server-"+m)),
+			)
+			links = append(links, healthTreeLink{SourceEntityID: "g", MonitorID: "rollup", TargetEntityID: m, MemberMonitorID: "avail"})
+		}
+
+		v := viewHealthTree(t, healthTreeFrames(rows, links, "g", members, true, false))
+		if len(v.ids) != healthTreeLayoutNodes+1 {
+			t.Fatalf("got %d nodes, want the group and its %d members", len(v.ids), healthTreeLayoutNodes)
+		}
+		v.assertConnected(t)
+		// The group's aggregate and rollup monitors are gone, so members hang
+		// straight off the group.
+		v.assertParents(t, "m000:avail", "g:health")
+		v.assertLabel(t, "m000:avail", "server-m000", "Availability")
+		got := noticeTexts(v.notices)
+		if !strings.Contains(got, "Only objects are shown") || !strings.Contains(got, "Pick a single instance") {
+			t.Errorf("notices = %q, want one saying only objects are shown, suggesting a single instance", got)
+		}
+	})
+}
+
+func TestHealthTreeFramesTruncation(t *testing.T) {
+	t.Run("a group too big even as objects keeps its top and says so", func(t *testing.T) {
+		rows := []healthTreeMonitorRow{monitorRow("g", "health", "", "Entity Health", 0, "Every Server")}
+		var members []string
+		for i := 0; i < healthTreeMaxNodes+10; i++ {
+			m := fmt.Sprintf("m%05d", i)
+			members = append(members, m)
+			rows = append(rows, monitorRow(m, "health", "", "Entity Health", 1, "server-"+m))
+		}
+		v := viewHealthTree(t, healthTreeFrames(rows, nil, "g", members, false, false))
 		if len(v.ids) != healthTreeMaxNodes {
 			t.Errorf("got %d nodes, want the cap of %d", len(v.ids), healthTreeMaxNodes)
 		}
-		if v.ids[0] != "e1:health" {
+		if v.ids[0] != "g:health" {
 			t.Errorf("first node = %s, want the root", v.ids[0])
 		}
 		v.assertConnected(t)
